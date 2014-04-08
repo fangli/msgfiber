@@ -19,4 +19,8 @@ _cgo_export.*
 
 _testmain.go
 
+msgfiber
+*.sublime-project
+*.sublime-workspace
+
 *.exe

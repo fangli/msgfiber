@@ -1,4 +1,4 @@
 msgfiber
 ========
 
-The decentralized and distributed message synchronization system
+A decentralized and distributed message synchronization system
