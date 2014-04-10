@@ -21,32 +21,30 @@
 package structure
 
 import (
-	"net"
+	"time"
 )
 
 type Command struct {
 	Op      string
 	Channel []string
 	Message []byte
+	Reqtime int64
 }
 
 type NodeStatus struct {
-	Status            int
-	Op                string
-	Channels_count    int
-	Pending_msg_count int
-	Storage_trend     [100]int
-	Subscriber_count  int
-	Uptime            int64
+	Channels_count int
+	Storage_trend  [100]int
+	Connections    int
+	Uptime         int64
+	Reqtime        int64
 }
 
-type ClusterNodeStatus struct {
-	Address     string
-	Ping_result int
-	Last_ping   int64
-	Delay       int64
-	Node_stats  interface{}
-	Conn        net.Conn
+type ClusterStatus struct {
+	Connected         bool
+	Delay             string
+	SuccessfulRetries int64
+	FailedRetries     int64
+	Node_stats        interface{}
 }
 
 /////////////////////////////////////////////////
@@ -126,12 +124,13 @@ func NewSyncResponse() SyncResponse {
 /////////////////////////////////////////////////
 
 type StatsRequest struct {
-	Op string
-	T0 int64
+	Op      string
+	Reqtime int64
 }
 
 func NewStatsRequest() StatsRequest {
 	return StatsRequest{
-		Op: "stats",
+		Op:      "stats",
+		Reqtime: time.Now().UnixNano(),
 	}
 }

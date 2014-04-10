@@ -24,22 +24,22 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"github.com/fangli/msgfiber/structure"
 	_ "github.com/go-sql-driver/mysql"
 	"log"
-	"net"
 	"sync"
 	"time"
 )
 
 type StoreMidware struct {
-	Dsn               string
-	SyncInterval      time.Duration
-	Callback          func(string, []byte, net.Conn)
-	db                *sql.DB
-	msgPool           map[string][]byte
-	storeLock         sync.Mutex
-	statusCounterLock sync.Mutex
-	dbStatus          [100]int
+	Dsn                string
+	SyncInterval       time.Duration
+	ChangeNotification chan structure.SyncResponse
+	db                 *sql.DB
+	msgPool            map[string][]byte
+	msgPoolLock        sync.Mutex
+	statusCounterLock  sync.Mutex
+	dbStatus           [100]int
 }
 
 func (s *StoreMidware) Close() error {
@@ -62,9 +62,9 @@ func (s *StoreMidware) loadData() {
 		if err != nil {
 			log.Fatal("Couldn't load message: ", err.Error())
 		}
-		s.storeLock.Lock()
+		s.msgPoolLock.Lock()
 		s.msgPool[channel] = msg
-		s.storeLock.Unlock()
+		s.msgPoolLock.Unlock()
 	}
 	err = rows.Err()
 	if err != nil {
@@ -89,26 +89,16 @@ func (s *StoreMidware) sync() error {
 		}
 
 		if !bytes.Equal(s.msgPool[channel], msg) {
-			s.storeLock.Lock()
+			s.msgPoolLock.Lock()
 			s.msgPool[channel] = msg
-			s.storeLock.Unlock()
-			s.Callback(channel, msg, nil)
+			s.msgPoolLock.Unlock()
+			payload := structure.NewSyncResponse()
+			payload.Channel = channel
+			payload.Message = msg
+			s.ChangeNotification <- payload
 		}
 	}
-	err = rows.Err()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *StoreMidware) shiftDbStatus(status int) {
-	s.statusCounterLock.Lock()
-	defer s.statusCounterLock.Unlock()
-	for i := 0; i < len(s.dbStatus)-1; i++ {
-		s.dbStatus[i] = s.dbStatus[i+1]
-	}
-	s.dbStatus[len(s.dbStatus)-1] = status
+	return rows.Err()
 }
 
 func (s *StoreMidware) periodicSync() {
@@ -120,6 +110,15 @@ func (s *StoreMidware) periodicSync() {
 			s.shiftDbStatus(0)
 		}
 	}
+}
+
+func (s *StoreMidware) shiftDbStatus(status int) {
+	s.statusCounterLock.Lock()
+	defer s.statusCounterLock.Unlock()
+	for i := 0; i < len(s.dbStatus)-1; i++ {
+		s.dbStatus[i] = s.dbStatus[i+1]
+	}
+	s.dbStatus[len(s.dbStatus)-1] = status
 }
 
 func (s *StoreMidware) Init() bool {
@@ -142,6 +141,9 @@ func (s *StoreMidware) Init() bool {
 }
 
 func (s *StoreMidware) Update(channel string, msg []byte) error {
+	s.msgPoolLock.Lock()
+	defer s.msgPoolLock.Unlock()
+
 	if bytes.Equal(msg, s.msgPool[channel]) {
 		return errors.New("No changes found")
 	}
@@ -150,29 +152,26 @@ func (s *StoreMidware) Update(channel string, msg []byte) error {
 	if err != nil {
 		return err
 	} else {
-		s.storeLock.Lock()
 		s.msgPool[channel] = msg
-		s.storeLock.Unlock()
-		return err
+		return nil
 	}
 }
 
-func (s *StoreMidware) DryUpdate(channel string, msg []byte) error {
-	s.storeLock.Lock()
-	defer s.storeLock.Unlock()
+func (s *StoreMidware) UpdateWithoutDb(channel string, msg []byte) error {
+	s.msgPoolLock.Lock()
+	defer s.msgPoolLock.Unlock()
+
 	if bytes.Equal(msg, s.msgPool[channel]) {
 		return errors.New("No changes found")
 	} else {
-		s.storeLock.Lock()
 		s.msgPool[channel] = msg
-		s.storeLock.Unlock()
 		return nil
 	}
 }
 
 func (s *StoreMidware) MsgCount() int {
-	s.storeLock.Lock()
-	defer s.storeLock.Unlock()
+	s.msgPoolLock.Lock()
+	defer s.msgPoolLock.Unlock()
 	return len(s.msgPool)
 }
 
@@ -183,8 +182,8 @@ func (s *StoreMidware) DbStatus() [100]int {
 }
 
 func (s *StoreMidware) Get(channel string) []byte {
-	s.storeLock.Lock()
-	defer s.storeLock.Unlock()
+	s.msgPoolLock.Lock()
+	defer s.msgPoolLock.Unlock()
 	return s.msgPool[channel]
 }
 

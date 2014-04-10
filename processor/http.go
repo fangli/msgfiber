@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 )
 
 func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{}) {
@@ -36,7 +35,7 @@ func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{})
 }
 
 func (c *Processor) httpStatsHandler(w http.ResponseWriter, r *http.Request) {
-	status := c.genStatsInfo()
+	status := c.genStatsInfo(0)
 	c.writeHttpPayload(w, status)
 }
 
@@ -45,32 +44,32 @@ func (c *Processor) httpClusterStatsHandler(w http.ResponseWriter, r *http.Reque
 	c.writeHttpPayload(w, status)
 }
 
-func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
-		body := make([]byte, r.ContentLength)
-		_, err := r.Body.Read(body)
-		if err != nil {
-			http.Error(w, "Unable to read request body", 500)
-		}
+// func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
+// 	if r.Method == "POST" {
+// 		body := make([]byte, r.ContentLength)
+// 		_, err := r.Body.Read(body)
+// 		if err != nil {
+// 			http.Error(w, "Unable to read request body", 500)
+// 		}
 
-		channel := strings.Trim(r.Header.Get("CHANNEL"), " ")
-		if channel != "" && len(body) > 0 {
-			resp := c.setMsg(nil, channel, body)
-			c.writeHttpPayload(w, resp)
-		} else {
-			http.Error(w, "Missing HTTP header 'CHANNEL' or body data", 500)
-		}
+// 		channel := strings.Trim(r.Header.Get("CHANNEL"), " ")
+// 		if channel != "" && len(body) > 0 {
+// 			resp := c.setMsg(nil, channel, body)
+// 			c.writeHttpPayload(w, resp)
+// 		} else {
+// 			http.Error(w, "Missing HTTP header 'CHANNEL' or body data", 500)
+// 		}
 
-	} else {
-		http.Error(w, "Not Found", 404)
-	}
-}
+// 	} else {
+// 		http.Error(w, "Not Found", 404)
+// 	}
+// }
 
 func (c *Processor) serveHttp() {
 	go func() {
 		http.HandleFunc("/cluster_stats", c.httpClusterStatsHandler)
 		http.HandleFunc("/stats", c.httpStatsHandler)
-		http.HandleFunc("/set", c.httpSetHandler)
+		// http.HandleFunc("/set", c.httpSetHandler)
 		err := http.ListenAndServe(c.Config.HttpListen, nil)
 		log.Fatal("Can't create HTTP server:", err.Error())
 	}()

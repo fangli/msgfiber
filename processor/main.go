@@ -21,87 +21,78 @@
 package processor
 
 import (
-	"github.com/fangli/msgfiber/clientpool"
-	"github.com/fangli/msgfiber/nodepool"
-	"github.com/fangli/msgfiber/parsecfg"
-	"github.com/fangli/msgfiber/storemidware"
-	"github.com/fangli/msgfiber/structure"
-	"net"
-	"time"
+// "github.com/fangli/msgfiber/clientpool"
+// "github.com/fangli/msgfiber/nodepool"
+// "github.com/fangli/msgfiber/parsecfg"
+// "github.com/fangli/msgfiber/storemidware"
+// "github.com/fangli/msgfiber/structure"
+// "time"
 )
 
-type Processor struct {
-	Config    parsecfg.Config
-	clients   clientpool.Pool
-	store     storemidware.StoreMidware
-	cluster   nodepool.Pool
-	startTime int64
-}
+// func (p *Client) setMsg(conn net.Conn, channel string, msg []byte) structure.SetResponse {
+// 	resp := structure.NewSetResponse()
 
-func (c *Processor) setMsg(conn net.Conn, channel string, msg []byte) structure.SetResponse {
-	resp := structure.NewSetResponse()
+// 	if !p.cluster.AllConnected() {
+// 		resp.Status = 0
+// 		resp.Info = "One or more nodes in this cluster are disconnected. In order to prevent from data inconsistent we rejected your request"
+// 		return resp
+// 	}
 
-	if !c.cluster.AllConnected() {
-		resp.Status = 0
-		resp.Info = "One or more nodes in this cluster are disconnected. In order to prevent from data inconsistent we rejected your request"
-		return resp
-	}
+// 	err := p.store.Update(channel, msg)
+// 	if err != nil {
+// 		resp.Status = 0
+// 		resp.Info = err.Error()
+// 	} else {
+// 		resp.Status = 1
+// 		resp.Info = "Channel updated succeed"
+// 	}
+// 	if err == nil {
+// 		// p.cluster.NodeSync(channel, msg)
+// 		p.(channel, msg, conn)
+// 	}
+// 	return resp
+// }
 
-	err := c.store.Update(channel, msg)
-	if err != nil {
-		resp.Status = 0
-		resp.Info = err.Error()
-	} else {
-		resp.Status = 1
-		resp.Info = "Channel updated succeed"
-	}
-	if err == nil {
-		// c.cluster.NodeSync(channel, msg)
-		c.broadcast(channel, msg, conn)
-	}
-	return resp
-}
+// func (p *Processor) genStatsInfo() structure.NodeStatus {
+// 	var status structure.NodeStatus
+// 	status.Uptime = time.Now().Unix() - p.startTime
+// 	status.Status = 1
+// 	status.Op = "stats"
+// 	status.Subscriber_count = p.clients.ClientCount()
+// 	status.Pending_msg_count = p.clients.PendingMsgCount()
+// 	status.Channels_count = p.store.MsgCount()
+// 	status.Storage_trend = p.store.DbStatus()
+// 	return status
+// }
 
-func (c *Processor) genStatsInfo() structure.NodeStatus {
-	var status structure.NodeStatus
-	status.Uptime = time.Now().Unix() - c.startTime
-	status.Status = 1
-	status.Op = "stats"
-	status.Subscriber_count = c.clients.ClientCount()
-	status.Pending_msg_count = c.clients.PendingMsgCount()
-	status.Channels_count = c.store.MsgCount()
-	status.Storage_trend = c.store.DbStatus()
-	return status
-}
+// func (p *Processor) genClusterStatsInfo() []structure.ClusterNodeStatus {
+// 	return p.cluster.Stats()
+// }
 
-func (c *Processor) genClusterStatsInfo() []structure.ClusterNodeStatus {
-	return c.cluster.Stats()
-}
+// func (p *Processor) ServeForever() {
 
-func (c *Processor) ServeForever() {
+// 	p.init()
 
-	c.init()
+// 	// p.serveHttp()
+// 	p.serveTcp()
+// }
 
-	c.serveHttp()
-	c.serveTcp()
-}
+// func (p *Processor) init() {
+// 	p.startTime = time.Now().Unix()
 
-func (c *Processor) init() {
-	c.startTime = time.Now().Unix()
+// 	p.clients = clientpool.Pool{}
+// 	p.clients.Init()
 
-	c.clients = clientpool.Pool{}
-	c.clients.Init()
+// 	p.store = storemidware.StoreMidware{
+// 		Dsn:                p.Config.Dsn,
+// 		SyncInterval:       p.Config.SyncInterval,
+// 		ChangeNotification: p.broadcastChan,
+// 	}
+// 	p.store.Init()
 
-	c.store = storemidware.StoreMidware{
-		Dsn:          c.Config.Dsn,
-		SyncInterval: c.Config.SyncInterval,
-		Callback:     c.broadcast,
-	}
-	c.store.Init()
+// 	p.cluster = nodepool.Pool{
+// 		Nodes: p.Config.Nodes,
+// 	}
+// 	p.cluster.Init()
 
-	c.cluster = nodepool.Pool{
-		Nodes: c.Config.Nodes,
-	}
-	c.cluster.Init()
-
-}
+// }

@@ -26,60 +26,90 @@ import (
 	"github.com/vmihailenco/msgpack"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
 
+type Node struct {
+	Name              string
+	Conn              net.Conn
+	Stats             interface{}
+	SuccessfulRetries int64
+	FailedRetries     int64
+	Delay             string
+	NodeLock          sync.Mutex
+}
+
 type Pool struct {
-	Nodes         []string
-	NodesChannels []chan structure.NodeStatus
-	Clients       []structure.ClusterNodeStatus
-	syncMaplock   sync.Mutex
+	NodeAddrs    []string
+	NodeList     map[string]*Node
+	NodeListLock sync.Mutex
 }
 
-func (n *Pool) setConnMap(i int, conn net.Conn) {
-	n.syncMaplock.Lock()
-	defer n.syncMaplock.Unlock()
-
-	if n.Clients[i].Conn != nil {
-		n.Clients[i].Conn.Close()
-	}
-	n.Clients[i].Conn = conn
-	n.Clients[i].Last_ping = time.Now().Unix()
-	if conn != nil {
-		n.Clients[i].Ping_result = 1
-	} else {
-		n.Clients[i].Ping_result = 0
+func (n *Node) reset() {
+	if n.Conn != nil {
+		n.Conn.Close()
+		n.Conn = nil
+		n.Stats = nil
 	}
 }
 
-func (n *Pool) reconnect(i int) bool {
-	conn, err := net.DialTimeout("tcp", n.Nodes[i], time.Second*5)
+func (n *Node) Receiver() {
+	defer n.reset()
+	decoder := msgpack.NewDecoder(n.Conn)
+	stats := structure.NodeStatus{}
+	for {
+		n.Conn.SetReadDeadline(time.Now().Add(time.Second * 2))
+		err := decoder.Decode(&stats)
+		n.NodeLock.Lock()
+		if err != nil {
+			log.Println("Read thread exited", n.Name, err.Error())
+			n.Stats = nil
+			n.Delay = "N/A"
+			n.NodeLock.Unlock()
+			return
+		} else {
+			n.Stats = stats
+			n.Delay = strconv.FormatInt((time.Now().UnixNano()-stats.Reqtime)/10e6, 10) + "ms"
+			n.NodeLock.Unlock()
+		}
+
+	}
+}
+
+func (n *Node) Connect() error {
+	conn, err := net.DialTimeout("tcp", n.Name, time.Second*3)
+
+	n.NodeLock.Lock()
+	defer n.NodeLock.Unlock()
+
 	if err != nil {
-		n.setConnMap(i, nil)
-		return false
+		n.FailedRetries++
+		return err
 	}
-	n.setConnMap(i, conn)
-	return true
+	n.SuccessfulRetries++
+	n.reset()
+
+	n.Conn = conn
+	go n.Receiver()
+	return nil
 }
 
-func (n *Pool) statsPing(i int) error {
-	defer n.syncMaplock.Unlock()
-
+func (n *Node) statsPing() error {
+	defer n.NodeLock.Unlock()
 	statsRequest := structure.NewStatsRequest()
-	statsRequest.T0 = time.Now().Unix()
 	payload, _ := msgpack.Marshal(statsRequest)
-
-	n.syncMaplock.Lock()
-	if n.Clients[i].Conn == nil {
+	n.NodeLock.Lock()
+	if n.Conn == nil {
 		return errors.New("No connection established")
 	}
-	_, err := n.Clients[i].Conn.Write(payload)
+	n.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
+	_, err := n.Conn.Write(payload)
 	return err
 }
 
-func (n *Pool) NodeSync(channel string, msg []byte) {
-	defer n.syncMaplock.Unlock()
+func (p *Pool) NodeSync(channel string, msg []byte) {
 
 	cmd := structure.Command{}
 	cmd.Op = "sync"
@@ -88,66 +118,81 @@ func (n *Pool) NodeSync(channel string, msg []byte) {
 
 	payload, _ := msgpack.Marshal(cmd)
 
-	n.syncMaplock.Lock()
-	for i := 0; i < len(n.Nodes); i++ {
-		if n.Clients[i].Conn != nil {
-			n.Clients[i].Conn.Write(payload)
+	for _, node := range p.NodeList {
+		node.NodeLock.Lock()
+		if node.Conn != nil {
+			node.Conn.Write(payload)
 		}
+		node.NodeLock.Unlock()
 	}
 }
 
-func (n *Pool) maintainConn(i int) {
-	n.reconnect(i)
-	for {
-		errPing := n.statsPing(i)
-		if errPing != nil {
-			log.Println(n.Nodes[i], ": ", errPing.Error())
-			n.reconnect(i)
+func (p *Pool) Stats() interface{} {
+	ret := make(map[string]*structure.ClusterStatus)
+	for name, node := range p.NodeList {
+		node.NodeLock.Lock()
+		ret[name] = &structure.ClusterStatus{}
+		if node.Conn != nil {
+			ret[name].Connected = true
+			ret[name].Node_stats = node.Stats
+		} else {
+			ret[name].Connected = false
+			ret[name].Node_stats = nil
 		}
-		// n.syncMaplock[i].Lock()
-		// n.Clients[i].Address = n.Nodes[i]
-		// n.Clients[i].Last_ping = time.Now().Unix()
-		// if errPing != nil {
-		// 	n.Clients[i].Ping_result = 0
-		// 	n.Clients[i].Delay = 0
-		// 	n.Clients[i].Node_stats = nil
-		// } else {
-		// 	n.Clients[i].Ping_result = 1
-		// 	n.Clients[i].Delay = int64((t2 - t1) / 10e6)
-		// 	n.Clients[i].Node_stats = stats
-		// }
-		// n.syncMaplock[i].Unlock()
-
-		time.Sleep(time.Second)
+		ret[name].Delay = node.Delay
+		ret[name].SuccessfulRetries = node.SuccessfulRetries
+		ret[name].FailedRetries = node.FailedRetries
+		node.NodeLock.Unlock()
 	}
+	return ret
 }
 
-func (n *Pool) makeOutConn() {
-	time.Sleep(time.Second)
-	for i := 0; i < len(n.Nodes); i++ {
-		go n.maintainConn(i)
-	}
-}
-
-func (n *Pool) AllConnected() bool {
-	defer n.syncMaplock.Unlock()
-	n.syncMaplock.Lock()
-	for _, node := range n.Clients {
-		if node.Ping_result == 0 {
+func (p *Pool) AllConnected() bool {
+	for _, node := range p.NodeList {
+		node.NodeLock.Lock()
+		if node.Conn == nil {
+			node.NodeLock.Unlock()
 			return false
+		} else {
+			node.NodeLock.Unlock()
 		}
 	}
 	return true
 }
 
-func (n *Pool) Stats() []structure.ClusterNodeStatus {
-	return n.Clients
+func (p *Pool) NodeHandler(node *Node) {
+	node.Connect()
+	for {
+		errPing := node.statsPing()
+		if errPing != nil {
+			log.Println(node.Name, ": ", errPing.Error())
+			node.Connect()
+		}
+		time.Sleep(time.Second)
+	}
 }
 
-func (n *Pool) Init() {
-	for i := 0; i < len(n.Nodes); i++ {
-		n.NodesChannels = append(n.NodesChannels, make(chan structure.NodeStatus))
-		n.Clients = append(n.Clients, structure.ClusterNodeStatus{})
+func (p *Pool) makeOutConn() {
+	p.NodeListLock.Lock()
+	defer p.NodeListLock.Unlock()
+
+	time.Sleep(time.Second)
+	for _, n := range p.NodeList {
+		go p.NodeHandler(n)
 	}
-	go n.makeOutConn()
+}
+
+func (p *Pool) Init() {
+	p.NodeList = make(map[string]*Node)
+
+	for _, addr := range p.NodeAddrs {
+		node := &Node{
+			Name:     addr,
+			Conn:     nil,
+			NodeLock: sync.Mutex{},
+		}
+		p.NodeList[addr] = node
+	}
+
+	go p.makeOutConn()
 }

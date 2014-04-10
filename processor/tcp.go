@@ -21,176 +21,262 @@
 package processor
 
 import (
-	"bytes"
-	"container/list"
 	"errors"
+	"github.com/fangli/msgfiber/nodepool"
+	"github.com/fangli/msgfiber/parsecfg"
+	"github.com/fangli/msgfiber/storemidware"
 	"github.com/fangli/msgfiber/structure"
 	"github.com/vmihailenco/msgpack"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
 type Client struct {
-	Name       string
-	Channels   []string
-	Incoming   chan structure.Command
-	Outgoing   chan interface{}
-	Conn       net.Conn
-	Quit       chan bool
-	ClientList *list.List
+	Name     string
+	Channels []string
+	Outgoing chan interface{}
+	Conn     net.Conn
+	Quit     chan bool
 }
 
-func (c *Client) Equal(other *Client) bool {
-	if bytes.Equal([]byte(c.Name), []byte(other.Name)) {
-		if c.Conn == other.Conn {
+type Processor struct {
+	Config         parsecfg.Config
+	store          storemidware.StoreMidware
+	nodes          nodepool.Pool
+	broadcastChan  chan structure.SyncResponse
+	startTime      int64
+	ClientList     map[string]*Client
+	ClientListLock sync.Mutex
+}
+
+func (p *Processor) ContainChannel(client *Client, channel string) bool {
+	for _, t := range client.Channels {
+		if t == channel {
 			return true
 		}
 	}
 	return false
 }
 
-func (c *Client) Remove() {
-	c.Quit <- true
-	for entry := c.ClientList.Front(); entry != nil; entry = entry.Next() {
-		client := entry.Value.(Client)
-		if c.Equal(&client) {
-			c.ClientList.Remove(entry)
+func (p *Processor) Remove(client *Client) {
+	client.Quit <- true
+	client.Quit <- true
+	p.ClientListLock.Lock()
+	for name, _ := range p.ClientList {
+		if name == client.Name {
+			delete(p.ClientList, client.Name)
 		}
 	}
-	c.Conn.Close()
+	p.ClientListLock.Unlock()
+	client.Conn.Close()
 }
 
-func (c *Processor) broadcast(channel string, msg []byte, source net.Conn) {
-	c.clients.Broadcast(channel, msg, source)
+func (p *Processor) BroadcastOthers(client *Client, channel string, msg []byte) {
+	payload := structure.NewSyncResponse()
+	payload.Channel = channel
+	payload.Message = msg
+	p.ClientListLock.Lock()
+	for _, c := range p.ClientList {
+		if p.ContainChannel(c, channel) {
+			if client.Name != c.Name {
+				p.Write(c, payload)
+			}
+		}
+	}
+	p.ClientListLock.Unlock()
 }
 
-func (c *Processor) writePayload(client *Client, payload interface{}) {
+func (p *Processor) Write(client *Client, payload interface{}) {
 	client.Outgoing <- payload
 }
 
-func (c *Processor) stats(client *Client) {
-	c.writePayload(client, c.genStatsInfo())
+func (p *Processor) NodesOk() error {
+	if p.nodes.AllConnected() {
+		return nil
+	}
+	return errors.New("One or more nodes in this cluster are disconnected. In order to prevent from data inconsistent we rejected your request")
 }
 
-func (c *Processor) clusterStats(client *Client) {
-	c.writePayload(client, c.genClusterStatsInfo())
+func (p *Processor) BroadcastHandler() {
+	for {
+		msg := <-p.broadcastChan
+		p.ClientListLock.Lock()
+		for _, c := range p.ClientList {
+			if p.ContainChannel(c, msg.Channel) {
+				p.Write(c, msg)
+			}
+		}
+		p.ClientListLock.Unlock()
+	}
 }
 
-func (c *Processor) get(client *Client) {
+func (p *Processor) stats(reqTime int64) interface{} {
+	return p.genStatsInfo(reqTime)
+}
+
+func (p *Processor) nodesStats() interface{} {
+	return p.genClusterStatsInfo()
+}
+
+func (p *Processor) get(client *Client) interface{} {
 	msgMap := make(map[string][]byte)
-	for _, channel := range c.clients.CurrentChannel(client.Conn) {
-		msgMap[channel] = c.store.Get(channel)
+	for _, channel := range client.Channels {
+		msgMap[channel] = p.store.Get(channel)
 	}
 	resp := structure.NewGetResponse()
 	resp.Channel = msgMap
-	c.writePayload(client, resp)
+	return resp
 }
 
-func (c *Processor) subscribe(client *Client, channels []string) {
-	c.clients.Subscribe(client.Conn, channels)
+func (p *Processor) subscribe(client *Client, channels []string) interface{} {
+	client.Channels = channels
 	resp := structure.NewSubscribeResponse()
 	resp.Channel = channels
-	c.writePayload(client, resp)
+	return resp
 }
 
-func (c *Processor) set(client *Client, channel string, msg []byte) {
-	c.writePayload(client, c.setMsg(client.Conn, channel, msg))
-}
-
-func (c *Processor) sync(client *Client, channel string, msg []byte) {
-	if c.store.DryUpdate(channel, msg) == nil {
-		c.cluster.NodeSync(channel, msg)
-		c.broadcast(channel, msg, client.Conn)
+func (p *Processor) set(client *Client, channel string, msg []byte) interface{} {
+	resp := structure.NewSetResponse()
+	log.Println("CMD SET: Checking NodesOK")
+	err := p.NodesOk()
+	if err != nil {
+		resp.Status = 0
+		resp.Info = err.Error()
+		return resp
 	}
+	log.Println("CMD SET: Updating store and DB")
+	err = p.store.Update(channel, msg)
+	if err != nil {
+		resp.Status = 0
+		resp.Info = err.Error()
+		return resp
+	}
+	log.Println("CMD SET: Start node sync")
+	p.nodes.NodeSync(channel, msg)
+	log.Println("CMD SET: Start broadcastothers")
+	p.BroadcastOthers(client, channel, msg)
+
+	resp.Status = 1
+	resp.Info = "OK"
+	return resp
 }
 
-func (c *Processor) errResponse(client *Client, op string, errNotice string) {
+func (p *Processor) sync(client *Client, channel string, msg []byte) interface{} {
+	log.Println("CMD SYNC: Trying update store")
+	if p.store.UpdateWithoutDb(channel, msg) == nil {
+		log.Println("CMD SYNC: start node sync")
+		p.nodes.NodeSync(channel, msg)
+		log.Println("CMD SYNC: start broadcast")
+		p.BroadcastOthers(client, channel, msg)
+	} else {
+		log.Println("CMD SYNC: No need sync to others")
+	}
+	return nil
+}
+
+func (p *Processor) errResponse(client *Client, op string, errNotice string) interface{} {
 	resp := structure.NewErrorResponse()
 	resp.Info = errNotice
 	resp.Op = op
-	client.Outgoing <- resp
+	return resp
 }
 
-func (c *Processor) execCommand(client *Client, cmd *structure.Command) {
+func (p *Processor) execCommand(client *Client, cmd *structure.Command) interface{} {
 	switch cmd.Op {
 	case "stats":
-		c.stats(client)
+		if !(cmd.Reqtime > 0) {
+			return p.errResponse(client, "stats", "No Reqtime!")
+		}
+		return p.stats(cmd.Reqtime)
 	case "cluster_stats":
-		c.clusterStats(client)
+		return p.nodesStats()
 	case "get":
-		c.get(client)
+		return p.get(client)
 	case "subscribe":
 		if cmd.Channel == nil {
-			c.errResponse(client, "subscribe", "You must specific valid 'Channel' field for the channels you want to subscribe")
-			return
+			return p.errResponse(client, "subscribe", "You must specific valid 'Channel' field for the channels you want to subscribe")
 		}
-		c.subscribe(client, cmd.Channel)
+		return p.subscribe(client, cmd.Channel)
 	case "set":
 		if cmd.Channel == nil || len(cmd.Channel) != 1 {
-			c.errResponse(client, "set", "You must specific valid 'Channel' field for the channels you want to update")
-			return
+			return p.errResponse(client, "set", "You must specific valid 'Channel' field for the channels you want to update")
 		}
 		if cmd.Message == nil {
-			c.errResponse(client, "set", "You must specific valid 'Message' for those channels")
-			return
+			return p.errResponse(client, "set", "You must specific valid 'Message' for those channels")
 		}
-		c.set(client, cmd.Channel[0], cmd.Message)
+		return p.set(client, cmd.Channel[0], cmd.Message)
 	case "sync":
 		if cmd.Channel == nil || len(cmd.Channel) != 1 {
-			errors.New("Invalid sync command received, no valid 'Channel'")
-			return
+			return errors.New("Invalid sync command received, no valid 'Channel'")
 		}
 		if cmd.Message == nil {
-			errors.New("Invalid sync command received, no valid 'Message'")
-			return
+			return errors.New("Invalid sync command received, no valid 'Message'")
 		}
-		c.sync(client, cmd.Channel[0], cmd.Message)
+		return p.sync(client, cmd.Channel[0], cmd.Message)
 	case "":
-		c.errResponse(client, "UNKNOWN", "Directive 'Op' not found, I don't know what to do.")
+		return p.errResponse(client, "UNKNOWN", "Directive 'Op' not found, I don't know what to do.")
 	default:
-		c.errResponse(client, cmd.Op, "Directive 'Op' incorrect. I don't know what does '"+cmd.Op+"' mean")
+		return p.errResponse(client, cmd.Op, "Directive 'Op' incorrect. I don't know what does '"+cmd.Op+"' mean")
 	}
 }
 
-func (c *Processor) ClientSender(client *Client) {
-
+func (p *Processor) ClientSender(client *Client) {
+	defer p.Remove(client)
+	defer log.Println("Sender exit:", client.Name)
+	for {
+		select {
+		case resp := <-client.Outgoing:
+			payload, _ := msgpack.Marshal(resp)
+			client.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
+			_, err := client.Conn.Write(payload)
+			if err != nil {
+				return
+			}
+		case <-client.Quit:
+			return
+		}
+	}
 }
 
-func (c *Processor) ClientReader(client *Client) {
-	defer client.Remove()
+func (p *Processor) ClientReader(client *Client) {
+	defer p.Remove(client)
+	defer log.Println("Reader exit:", client.Name)
 	var err error
 	decoder := msgpack.NewDecoder(client.Conn)
 	for {
 		cmd := &structure.Command{}
-		client.Conn.SetReadDeadline(time.Now().Add(c.Config.ConnExpires))
+		client.Conn.SetReadDeadline(time.Now().Add(p.Config.ConnExpires))
 		err = decoder.Decode(cmd)
 		if err != nil {
 			return
 		}
-		// log.Printf("%+v", cmd)
-		c.execCommand(client, cmd)
+		result := p.execCommand(client, cmd)
+		if result != nil {
+			p.Write(client, result)
+		}
 	}
 }
 
-func (c *Processor) ClientHandler(conn net.Conn, clientList *list.List) {
+func (p *Processor) ClientHandler(conn net.Conn) {
+	name := conn.RemoteAddr().String()
 	newClient := &Client{
-		Name:       conn.RemoteAddr().String(),
-		Incoming:   make(chan structure.Command),
-		Outgoing:   make(chan interface{}),
-		Conn:       conn,
-		Quit:       make(chan bool),
-		ClientList: clientList,
+		Name:     name,
+		Outgoing: make(chan interface{}, 100000),
+		Channels: []string{},
+		Conn:     conn,
+		Quit:     make(chan bool, 2),
 	}
-	clientList.PushBack(*newClient)
-	go c.ClientSender(newClient)
-	go c.ClientReader(newClient)
+	p.ClientListLock.Lock()
+	p.ClientList[name] = newClient
+	p.ClientListLock.Unlock()
+	go p.ClientSender(newClient)
+	go p.ClientReader(newClient)
 }
 
-func (c *Processor) serveTcp() {
-	clientList := list.New()
-
-	ln, err := net.Listen("tcp", c.Config.TcpListen)
+func (p *Processor) serveTcp() {
+	ln, err := net.Listen("tcp", p.Config.TcpListen)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -202,6 +288,51 @@ func (c *Processor) serveTcp() {
 			log.Println(err)
 			continue
 		}
-		go c.ClientHandler(conn, clientList)
+		go p.ClientHandler(conn)
 	}
+}
+
+func (p *Processor) genStatsInfo(reqTime int64) structure.NodeStatus {
+	var status structure.NodeStatus
+	status.Uptime = time.Now().Unix() - p.startTime
+	status.Reqtime = reqTime
+	p.ClientListLock.Lock()
+	status.Connections = len(p.ClientList)
+	p.ClientListLock.Unlock()
+	status.Channels_count = p.store.MsgCount()
+	status.Storage_trend = p.store.DbStatus()
+	return status
+}
+
+func (p *Processor) genClusterStatsInfo() interface{} {
+	return p.nodes.Stats()
+}
+
+func (p *Processor) ServeForever() {
+	p.init()
+	p.serveHttp()
+	p.serveTcp()
+}
+
+func (p *Processor) init() {
+
+	p.broadcastChan = make(chan structure.SyncResponse)
+	p.ClientList = make(map[string]*Client)
+
+	go p.BroadcastHandler()
+
+	p.startTime = time.Now().Unix()
+
+	p.store = storemidware.StoreMidware{
+		Dsn:                p.Config.Dsn,
+		SyncInterval:       p.Config.SyncInterval,
+		ChangeNotification: p.broadcastChan,
+	}
+	p.store.Init()
+
+	p.nodes = nodepool.Pool{
+		NodeAddrs: p.Config.Nodes,
+	}
+	p.nodes.Init()
+
 }
