@@ -176,6 +176,10 @@ func (p *Processor) sync(client *Client, channel string, msg []byte) interface{}
 	return nil
 }
 
+func (p *Processor) ping() interface{} {
+	return structure.NewPingResponse()
+}
+
 func (p *Processor) errResponse(client *Client, op string, errNotice string) interface{} {
 	resp := structure.NewErrorResponse()
 	resp.Info = errNotice
@@ -185,6 +189,8 @@ func (p *Processor) errResponse(client *Client, op string, errNotice string) int
 
 func (p *Processor) execCommand(client *Client, cmd *structure.Command) interface{} {
 	switch cmd.Op {
+	case "ping":
+		return p.ping()
 	case "stats":
 		if !(cmd.Reqtime > 0) {
 			return p.errResponse(client, "stats", "No Reqtime!")
@@ -215,10 +221,8 @@ func (p *Processor) execCommand(client *Client, cmd *structure.Command) interfac
 			return errors.New("Invalid sync command received, no valid 'Message'")
 		}
 		return p.sync(client, cmd.Channel[0], cmd.Message)
-	case "":
-		return p.errResponse(client, "UNKNOWN", "Directive 'Op' not found, I don't know what to do.")
 	default:
-		return p.errResponse(client, cmd.Op, "Directive 'Op' incorrect. I don't know what does '"+cmd.Op+"' mean")
+		return p.errResponse(client, "Unknown", "Unrecognized Command")
 	}
 }
 

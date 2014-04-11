@@ -117,6 +117,18 @@ func NewSyncResponse() SyncResponse {
 	}
 }
 
+type PingResponse struct {
+	Status int
+	Op     string
+}
+
+func NewPingResponse() PingResponse {
+	return PingResponse{
+		Status: 1,
+		Op:     "ping",
+	}
+}
+
 /////////////////////////////////////////////////
 
 /////////////////////////////////////////////////
