@@ -21,16 +21,18 @@
 package processor
 
 import (
+	"bytes"
 	"errors"
+	"log"
+	"net"
+	"sync"
+	"time"
+
 	"github.com/fangli/msgfiber/nodepool"
 	"github.com/fangli/msgfiber/parsecfg"
 	"github.com/fangli/msgfiber/storemidware"
 	"github.com/fangli/msgfiber/structure"
 	"github.com/vmihailenco/msgpack"
-	"log"
-	"net"
-	"sync"
-	"time"
 )
 
 type Client struct {
@@ -41,12 +43,22 @@ type Client struct {
 	Quit     chan bool
 }
 
+type ProcessorCounters struct {
+	startTime               int64
+	TotalConnections        int64
+	TotalConnectionsLock    sync.Mutex
+	RejectedConnections     int64
+	RejectedConnectionsLock sync.Mutex
+	Commands                int64
+	CommandsLock            sync.Mutex
+}
+
 type Processor struct {
 	Config         parsecfg.Config
 	store          storemidware.StoreMidware
 	nodes          nodepool.Pool
 	broadcastChan  chan structure.SyncResponse
-	startTime      int64
+	Stats          ProcessorCounters
 	ClientList     map[string]*Client
 	ClientListLock sync.Mutex
 }
@@ -73,14 +85,14 @@ func (p *Processor) Remove(client *Client) {
 	client.Conn.Close()
 }
 
-func (p *Processor) BroadcastOthers(client *Client, channel string, msg []byte) {
+func (p *Processor) BroadcastOthers(excludeName string, channel string, msg []byte) {
 	payload := structure.NewSyncResponse()
 	payload.Channel = channel
 	payload.Message = msg
 	p.ClientListLock.Lock()
 	for _, c := range p.ClientList {
 		if p.ContainChannel(c, channel) {
-			if client.Name != c.Name {
+			if excludeName != c.Name {
 				p.Write(c, payload)
 			}
 		}
@@ -137,41 +149,33 @@ func (p *Processor) subscribe(client *Client, channels []string) interface{} {
 	return resp
 }
 
-func (p *Processor) set(client *Client, channel string, msg []byte) interface{} {
+func (p *Processor) set(excludeName string, channel string, msg []byte) interface{} {
 	resp := structure.NewSetResponse()
-	log.Println("CMD SET: Checking NodesOK")
 	err := p.NodesOk()
 	if err != nil {
 		resp.Status = 0
 		resp.Info = err.Error()
 		return resp
 	}
-	log.Println("CMD SET: Updating store and DB")
 	err = p.store.Update(channel, msg)
 	if err != nil {
 		resp.Status = 0
 		resp.Info = err.Error()
 		return resp
 	}
-	log.Println("CMD SET: Start node sync")
 	p.nodes.NodeSync(channel, msg)
-	log.Println("CMD SET: Start broadcastothers")
-	p.BroadcastOthers(client, channel, msg)
+	p.BroadcastOthers(excludeName, channel, msg)
 
 	resp.Status = 1
 	resp.Info = "OK"
 	return resp
 }
 
-func (p *Processor) sync(client *Client, channel string, msg []byte) interface{} {
-	log.Println("CMD SYNC: Trying update store")
+func (p *Processor) sync(excludeName string, channel string, msg []byte) interface{} {
 	if p.store.UpdateWithoutDb(channel, msg) == nil {
-		log.Println("CMD SYNC: start node sync")
 		p.nodes.NodeSync(channel, msg)
-		log.Println("CMD SYNC: start broadcast")
-		p.BroadcastOthers(client, channel, msg)
+		p.BroadcastOthers(excludeName, channel, msg)
 	} else {
-		log.Println("CMD SYNC: No need sync to others")
 	}
 	return nil
 }
@@ -212,7 +216,7 @@ func (p *Processor) execCommand(client *Client, cmd *structure.Command) interfac
 		if cmd.Message == nil {
 			return p.errResponse(client, "set", "You must specific valid 'Message' for those channels")
 		}
-		return p.set(client, cmd.Channel[0], cmd.Message)
+		return p.set(client.Name, cmd.Channel[0], cmd.Message)
 	case "sync":
 		if cmd.Channel == nil || len(cmd.Channel) != 1 {
 			return errors.New("Invalid sync command received, no valid 'Channel'")
@@ -220,15 +224,21 @@ func (p *Processor) execCommand(client *Client, cmd *structure.Command) interfac
 		if cmd.Message == nil {
 			return errors.New("Invalid sync command received, no valid 'Message'")
 		}
-		return p.sync(client, cmd.Channel[0], cmd.Message)
+		return p.sync(client.Name, cmd.Channel[0], cmd.Message)
 	default:
 		return p.errResponse(client, "Unknown", "Unrecognized Command")
 	}
 }
 
+func (p *Processor) CheckPsk(psk []byte) error {
+	if bytes.Equal(psk, p.Config.Psk) {
+		return nil
+	}
+	return errors.New("Invalid Access Key!!!")
+}
+
 func (p *Processor) ClientSender(client *Client) {
 	defer p.Remove(client)
-	defer log.Println("Sender exit:", client.Name)
 	for {
 		select {
 		case resp := <-client.Outgoing:
@@ -244,9 +254,20 @@ func (p *Processor) ClientSender(client *Client) {
 	}
 }
 
+func (p *Processor) AddRejectedConnections() {
+	p.Stats.RejectedConnectionsLock.Lock()
+	defer p.Stats.RejectedConnectionsLock.Unlock()
+	p.Stats.RejectedConnections++
+}
+
+func (p *Processor) AddCmdCount() {
+	p.Stats.CommandsLock.Lock()
+	defer p.Stats.CommandsLock.Unlock()
+	p.Stats.Commands++
+}
+
 func (p *Processor) ClientReader(client *Client) {
 	defer p.Remove(client)
-	defer log.Println("Reader exit:", client.Name)
 	var err error
 	decoder := msgpack.NewDecoder(client.Conn)
 	for {
@@ -256,6 +277,14 @@ func (p *Processor) ClientReader(client *Client) {
 		if err != nil {
 			return
 		}
+
+		err = p.CheckPsk(cmd.Psk)
+		if err != nil {
+			p.AddRejectedConnections()
+			return
+		}
+
+		p.AddCmdCount()
 		result := p.execCommand(client, cmd)
 		if result != nil {
 			p.Write(client, result)
@@ -275,17 +304,24 @@ func (p *Processor) ClientHandler(conn net.Conn) {
 	p.ClientListLock.Lock()
 	p.ClientList[name] = newClient
 	p.ClientListLock.Unlock()
+
+	p.Stats.TotalConnectionsLock.Lock()
+	p.Stats.TotalConnections++
+	p.Stats.TotalConnectionsLock.Unlock()
+
 	go p.ClientSender(newClient)
 	go p.ClientReader(newClient)
 }
 
 func (p *Processor) serveTcp() {
+	log.Println("Starting TCP socket at", p.Config.TcpListen)
 	ln, err := net.Listen("tcp", p.Config.TcpListen)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 	defer ln.Close()
 
+	log.Println("TCP service started")
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -298,13 +334,29 @@ func (p *Processor) serveTcp() {
 
 func (p *Processor) genStatsInfo(reqTime int64) structure.NodeStatus {
 	var status structure.NodeStatus
-	status.Uptime = time.Now().Unix() - p.startTime
+	status.Uptime = time.Now().Unix() - p.Stats.startTime
 	status.Reqtime = reqTime
+
 	p.ClientListLock.Lock()
-	status.Connections = len(p.ClientList)
+	status.Connections_current = len(p.ClientList)
 	p.ClientListLock.Unlock()
+
+	p.Stats.TotalConnectionsLock.Lock()
+	status.Connections_total = p.Stats.TotalConnections
+	p.Stats.TotalConnectionsLock.Unlock()
+
+	p.Stats.RejectedConnectionsLock.Lock()
+	status.Connections_rejected = p.Stats.RejectedConnections
+	p.Stats.RejectedConnectionsLock.Unlock()
+
+	p.Stats.CommandsLock.Lock()
+	status.Commands = p.Stats.Commands
+	p.Stats.CommandsLock.Unlock()
+
 	status.Channels_count = p.store.MsgCount()
 	status.Storage_trend = p.store.DbStatus()
+	status.Sync_lasts = p.store.GetSyncPeriod()
+	status.Last_sync = p.store.GetLastSync()
 	return status
 }
 
@@ -325,7 +377,7 @@ func (p *Processor) init() {
 
 	go p.BroadcastHandler()
 
-	p.startTime = time.Now().Unix()
+	p.Stats.startTime = time.Now().Unix()
 
 	p.store = storemidware.StoreMidware{
 		Dsn:                p.Config.Dsn,
@@ -336,6 +388,7 @@ func (p *Processor) init() {
 
 	p.nodes = nodepool.Pool{
 		NodeAddrs: p.Config.Nodes,
+		Psk:       p.Config.Psk,
 	}
 	p.nodes.Init()
 

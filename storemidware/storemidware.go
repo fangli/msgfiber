@@ -24,11 +24,13 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
-	"github.com/fangli/msgfiber/structure"
-	_ "github.com/go-sql-driver/mysql"
 	"log"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/fangli/msgfiber/structure"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type StoreMidware struct {
@@ -39,6 +41,9 @@ type StoreMidware struct {
 	msgPool            map[string][]byte
 	msgPoolLock        sync.Mutex
 	statusCounterLock  sync.Mutex
+	SyncPeriod         int64
+	LastSync           int64
+	SyncLastsLock      sync.Mutex
 	dbStatus           [100]int
 }
 
@@ -46,7 +51,7 @@ func (s *StoreMidware) Close() error {
 	return s.db.Close()
 }
 
-func (s *StoreMidware) loadData() {
+func (s *StoreMidware) loadData() (count int) {
 	var (
 		channel string
 		msg     []byte
@@ -70,6 +75,7 @@ func (s *StoreMidware) loadData() {
 	if err != nil {
 		log.Fatal("Couldn't load message: ", err.Error())
 	}
+	return len(s.msgPool)
 }
 
 func (s *StoreMidware) sync() error {
@@ -102,9 +108,17 @@ func (s *StoreMidware) sync() error {
 }
 
 func (s *StoreMidware) periodicSync() {
+	log.Println("Synchronization from storage every", s.SyncInterval)
 	for {
 		time.Sleep(s.SyncInterval)
-		if s.sync() == nil {
+		t0 := time.Now().UnixNano()
+		err := s.sync()
+		t1 := time.Now().UnixNano()
+		s.SyncLastsLock.Lock()
+		s.SyncPeriod = t1 - t0
+		s.LastSync = time.Now().Unix()
+		s.SyncLastsLock.Unlock()
+		if err == nil {
 			s.shiftDbStatus(1)
 		} else {
 			s.shiftDbStatus(0)
@@ -123,6 +137,7 @@ func (s *StoreMidware) shiftDbStatus(status int) {
 
 func (s *StoreMidware) Init() bool {
 	var err error
+	log.Println("Initializing storage", s.Dsn)
 	s.msgPool = make(map[string][]byte)
 
 	s.db, err = sql.Open("mysql", s.Dsn)
@@ -135,7 +150,9 @@ func (s *StoreMidware) Init() bool {
 		log.Fatal("Couldn't connect to database: ", err.Error())
 	}
 
-	s.loadData()
+	log.Println("Loading saved data from storage")
+	count := s.loadData()
+	log.Println(count, "messages loaded")
 	go s.periodicSync()
 	return true
 }
@@ -175,6 +192,18 @@ func (s *StoreMidware) MsgCount() int {
 	return len(s.msgPool)
 }
 
+func (s *StoreMidware) GetSyncPeriod() string {
+	s.SyncLastsLock.Lock()
+	defer s.SyncLastsLock.Unlock()
+	return strconv.FormatInt(s.SyncPeriod/10e6, 10) + "ms"
+}
+
+func (s *StoreMidware) GetLastSync() int64 {
+	s.SyncLastsLock.Lock()
+	defer s.SyncLastsLock.Unlock()
+	return s.LastSync
+}
+
 func (s *StoreMidware) DbStatus() [100]int {
 	s.statusCounterLock.Lock()
 	defer s.statusCounterLock.Unlock()
@@ -186,12 +215,3 @@ func (s *StoreMidware) Get(channel string) []byte {
 	defer s.msgPoolLock.Unlock()
 	return s.msgPool[channel]
 }
-
-// func (s *StoreMidware) Get(channel string) ([]byte, error) {
-// 	var msg []byte
-// 	err := s.db.QueryRow("SELECT msg FROM msgstore WHERE channel=?", channel).Scan(&msg)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	return msg, nil
-// }

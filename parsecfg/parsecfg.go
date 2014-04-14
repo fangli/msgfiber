@@ -22,10 +22,16 @@ package parsecfg
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 )
+
+var SYS_VER string
+var SYS_BUILD_VER string
+var SYS_BUILD_DATE string
 
 type Config struct {
 	TcpListen    string
@@ -34,6 +40,7 @@ type Config struct {
 	SyncInterval time.Duration
 	Dsn          string
 	Nodes        []string
+	Psk          []byte
 }
 
 func Parse() Config {
@@ -44,11 +51,23 @@ func Parse() Config {
 	dsn := flag.String("store", "root@tcp(localhost:3306)/msgfiber?charset=utf8", "The connection DSN of cache storage")
 	syncinterval := flag.String("sync-interval", "1s", "The interval of syncing from DB, unit could be s, m, h or d")
 	nodesRaw := flag.String("nodes", "localhost:3264", "All nodes in this msgfiber cluster")
+	psk := flag.String("psk", "", "The pre-shared key of this cluster, must be same in a cluster")
+	version := flag.Bool("version", false, "Show version information")
+	v := flag.Bool("v", false, "Show version information")
 
 	flag.Parse()
 
+	if *version || *v {
+		fmt.Println("Msgfiber: A decentralized and distributed message synchronization system")
+		fmt.Println("Version", SYS_VER)
+		fmt.Println("Build", SYS_BUILD_VER)
+		fmt.Println("Compile at", SYS_BUILD_DATE)
+		os.Exit(0)
+	}
+
 	cfg.TcpListen = *tcplisten
 	cfg.HttpListen = *httplisten
+	cfg.Psk = []byte(*psk)
 	cfg.Dsn = *dsn
 	cfg.Nodes = strings.Split(*nodesRaw, ",")
 

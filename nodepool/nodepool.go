@@ -22,13 +22,14 @@ package nodepool
 
 import (
 	"errors"
-	"github.com/fangli/msgfiber/structure"
-	"github.com/vmihailenco/msgpack"
 	"log"
 	"net"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/fangli/msgfiber/structure"
+	"github.com/vmihailenco/msgpack"
 )
 
 type Node struct {
@@ -39,10 +40,12 @@ type Node struct {
 	FailedRetries     int64
 	Delay             string
 	NodeLock          sync.Mutex
+	Psk               []byte
 }
 
 type Pool struct {
 	NodeAddrs    []string
+	Psk          []byte
 	NodeList     map[string]*Node
 	NodeListLock sync.Mutex
 }
@@ -52,6 +55,7 @@ func (n *Node) reset() {
 		n.Conn.Close()
 		n.Conn = nil
 		n.Stats = nil
+		log.Println("Node", n.Name, "disconnected, please check the connection")
 	}
 }
 
@@ -64,7 +68,6 @@ func (n *Node) Receiver() {
 		err := decoder.Decode(&stats)
 		n.NodeLock.Lock()
 		if err != nil {
-			log.Println("Read thread exited", n.Name, err.Error())
 			n.Stats = nil
 			n.Delay = "N/A"
 			n.NodeLock.Unlock()
@@ -91,6 +94,7 @@ func (n *Node) Connect() error {
 	n.SuccessfulRetries++
 	n.reset()
 
+	log.Println("Node", n.Name, "connected")
 	n.Conn = conn
 	go n.Receiver()
 	return nil
@@ -99,6 +103,7 @@ func (n *Node) Connect() error {
 func (n *Node) statsPing() error {
 	defer n.NodeLock.Unlock()
 	statsRequest := structure.NewStatsRequest()
+	statsRequest.Psk = n.Psk
 	payload, _ := msgpack.Marshal(statsRequest)
 	n.NodeLock.Lock()
 	if n.Conn == nil {
@@ -115,6 +120,7 @@ func (p *Pool) NodeSync(channel string, msg []byte) {
 	cmd.Op = "sync"
 	cmd.Channel = []string{channel}
 	cmd.Message = msg
+	cmd.Psk = p.Psk
 
 	payload, _ := msgpack.Marshal(cmd)
 
@@ -165,8 +171,9 @@ func (p *Pool) NodeHandler(node *Node) {
 	for {
 		errPing := node.statsPing()
 		if errPing != nil {
-			log.Println(node.Name, ": ", errPing.Error())
-			node.Connect()
+			if node.Connect() == nil {
+				node.statsPing()
+			}
 		}
 		time.Sleep(time.Second)
 	}
@@ -177,19 +184,21 @@ func (p *Pool) makeOutConn() {
 	defer p.NodeListLock.Unlock()
 
 	time.Sleep(time.Second)
+	log.Println("Connecting to other nodes in cluster")
 	for _, n := range p.NodeList {
 		go p.NodeHandler(n)
 	}
 }
 
 func (p *Pool) Init() {
+	log.Println("Msgfiber nodes in this cluster:", p.NodeAddrs)
 	p.NodeList = make(map[string]*Node)
-
 	for _, addr := range p.NodeAddrs {
 		node := &Node{
 			Name:     addr,
 			Conn:     nil,
 			NodeLock: sync.Mutex{},
+			Psk:      p.Psk,
 		}
 		p.NodeList[addr] = node
 	}

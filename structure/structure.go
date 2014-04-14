@@ -29,14 +29,20 @@ type Command struct {
 	Channel []string
 	Message []byte
 	Reqtime int64
+	Psk     []byte
 }
 
 type NodeStatus struct {
-	Channels_count int
-	Storage_trend  [100]int
-	Connections    int
-	Uptime         int64
-	Reqtime        int64
+	Channels_count       int
+	Storage_trend        [100]int
+	Connections_current  int
+	Uptime               int64
+	Connections_total    int64
+	Connections_rejected int64
+	Commands             int64
+	Reqtime              int64
+	Sync_lasts           string
+	Last_sync            int64
 }
 
 type ClusterStatus struct {
@@ -138,6 +144,7 @@ func NewPingResponse() PingResponse {
 type StatsRequest struct {
 	Op      string
 	Reqtime int64
+	Psk     []byte
 }
 
 func NewStatsRequest() StatsRequest {

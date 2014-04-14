@@ -23,12 +23,26 @@ package main
 import (
 	"github.com/fangli/msgfiber/parsecfg"
 	"github.com/fangli/msgfiber/processor"
+	"log"
 )
 
-var cfg parsecfg.Config
+const BANNER = `
+ __  __             ______ _ _               
+|  \/  |           |  ____(_) |              
+| \  / |___  __ _  | |__   _| |__   ___ _ __ 
+| |\/| / __|/ _  | |  __| | | '_ \ / _ \ '__|
+| |  | \__ \ (_| | | |    | | |_) |  __/ |   
+|_|  |_|___/\__, | |_|    |_|_.__/ \___|_|   
+             __/ |                           
+            |___/                            
+`
 
 func main() {
-	cfg = parsecfg.Parse()
+	cfg := parsecfg.Parse()
+
+	log.Println("Starting MsgFiber...")
+	log.Println(BANNER)
+
 	app := processor.Processor{
 		Config: cfg,
 	}

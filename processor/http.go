@@ -22,8 +22,11 @@ package processor
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/fangli/msgfiber/structure"
 	"log"
 	"net/http"
+	"strings"
 )
 
 func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{}) {
@@ -34,42 +37,64 @@ func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{})
 	w.Write(data)
 }
 
+func (c *Processor) CheckPskHeader(w http.ResponseWriter, r *http.Request) error {
+	psk := strings.Trim(r.Header.Get("PSK"), " ")
+	if psk != string(c.Config.Psk) {
+		resp := structure.NewErrorResponse()
+		resp.Info = "PSK not acceptable, access denied!!!"
+		c.writeHttpPayload(w, resp)
+		return errors.New("PSK not Acceptable!!!")
+	} else {
+		return nil
+	}
+}
+
 func (c *Processor) httpStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if c.CheckPskHeader(w, r) != nil {
+		return
+	}
 	status := c.genStatsInfo(0)
 	c.writeHttpPayload(w, status)
 }
 
 func (c *Processor) httpClusterStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if c.CheckPskHeader(w, r) != nil {
+		return
+	}
 	status := c.genClusterStatsInfo()
 	c.writeHttpPayload(w, status)
 }
 
-// func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
-// 	if r.Method == "POST" {
-// 		body := make([]byte, r.ContentLength)
-// 		_, err := r.Body.Read(body)
-// 		if err != nil {
-// 			http.Error(w, "Unable to read request body", 500)
-// 		}
+func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
+	if c.CheckPskHeader(w, r) != nil {
+		return
+	}
+	if r.Method == "POST" {
+		body := make([]byte, r.ContentLength)
+		_, err := r.Body.Read(body)
+		if err != nil {
+			http.Error(w, "Unable to read request body", 500)
+		}
 
-// 		channel := strings.Trim(r.Header.Get("CHANNEL"), " ")
-// 		if channel != "" && len(body) > 0 {
-// 			resp := c.setMsg(nil, channel, body)
-// 			c.writeHttpPayload(w, resp)
-// 		} else {
-// 			http.Error(w, "Missing HTTP header 'CHANNEL' or body data", 500)
-// 		}
+		channel := strings.Trim(r.Header.Get("CHANNEL"), " ")
+		if channel != "" && len(body) > 0 {
+			resp := c.set("", channel, body)
+			c.writeHttpPayload(w, resp)
+		} else {
+			http.Error(w, "Missing HTTP header 'CHANNEL' or body data", 500)
+		}
 
-// 	} else {
-// 		http.Error(w, "Not Found", 404)
-// 	}
-// }
+	} else {
+		http.Error(w, "Not Found", 404)
+	}
+}
 
 func (c *Processor) serveHttp() {
 	go func() {
 		http.HandleFunc("/cluster_stats", c.httpClusterStatsHandler)
 		http.HandleFunc("/stats", c.httpStatsHandler)
-		// http.HandleFunc("/set", c.httpSetHandler)
+		http.HandleFunc("/set", c.httpSetHandler)
+		log.Println("Starting HTTP service at port", c.Config.HttpListen)
 		err := http.ListenAndServe(c.Config.HttpListen, nil)
 		log.Fatal("Can't create HTTP server:", err.Error())
 	}()
