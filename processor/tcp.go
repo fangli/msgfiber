@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fangli/msgfiber/memstats"
 	"github.com/fangli/msgfiber/nodepool"
 	"github.com/fangli/msgfiber/parsecfg"
 	"github.com/fangli/msgfiber/storemidware"
@@ -132,6 +133,10 @@ func (p *Processor) nodesStats() interface{} {
 	return p.genClusterStatsInfo()
 }
 
+func (p *Processor) nodesMemStats() interface{} {
+	return p.getMemStats()
+}
+
 func (p *Processor) get(client *Client) interface{} {
 	msgMap := make(map[string][]byte)
 	for _, channel := range client.Channels {
@@ -202,6 +207,8 @@ func (p *Processor) execCommand(client *Client, cmd *structure.Command) interfac
 		return p.stats(cmd.Reqtime)
 	case "cluster_stats":
 		return p.nodesStats()
+	case "mem_stats":
+		return p.nodesMemStats()
 	case "get":
 		return p.get(client)
 	case "subscribe":
@@ -362,6 +369,10 @@ func (p *Processor) genStatsInfo(reqTime int64) structure.NodeStatus {
 
 func (p *Processor) genClusterStatsInfo() interface{} {
 	return p.nodes.Stats()
+}
+
+func (p *Processor) getMemStats() interface{} {
+	return memstats.Stats()
 }
 
 func (p *Processor) ServeForever() {

@@ -23,10 +23,11 @@ package processor
 import (
 	"encoding/json"
 	"errors"
-	"github.com/fangli/msgfiber/structure"
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/fangli/msgfiber/structure"
 )
 
 func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{}) {
@@ -54,6 +55,14 @@ func (c *Processor) httpStatsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := c.genStatsInfo(0)
+	c.writeHttpPayload(w, status)
+}
+
+func (c *Processor) httpMemStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if c.CheckPskHeader(w, r) != nil {
+		return
+	}
+	status := c.getMemStats()
 	c.writeHttpPayload(w, status)
 }
 
@@ -92,6 +101,7 @@ func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
 func (c *Processor) serveHttp() {
 	go func() {
 		http.HandleFunc("/cluster_stats", c.httpClusterStatsHandler)
+		http.HandleFunc("/mem_stats", c.httpMemStatsHandler)
 		http.HandleFunc("/stats", c.httpStatsHandler)
 		http.HandleFunc("/set", c.httpSetHandler)
 		log.Println("Starting HTTP service at port", c.Config.HttpListen)
