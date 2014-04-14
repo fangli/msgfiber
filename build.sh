@@ -27,27 +27,50 @@ version=`cat VERSION`
 date=`date`
 git_ver=`git rev-parse --short HEAD`
 
-rm -rf dist/
 mkdir -p dist/linux_i386
 mkdir -p dist/linux_x64
 mkdir -p dist/osx_x64
+mkdir -p dist/osx_i386
+
+rm -rf dist/linux_i386/msgfiber
+rm -rf dist/linux_x64/msgfiber
+rm -rf dist/osx_x64/msgfiber
+rm -rf dist/osx_i386/msgfiber
+rm -rf dist/windows_x64/msgfiber.exe
+rm -rf dist/windows_i386/msgfiber.exe
 
 echo "Compiling linux/i386"
 export GOOS=linux
 export GOARCH=386
 go build -o "dist/linux_i386/msgfiber" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/linux_i386/msgfiber
 
 echo "Compiling linux/amd64"
 export GOOS=linux
 export GOARCH=amd64
 go build -o "dist/linux_x64/msgfiber" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/linux_x64/msgfiber
 
 echo "Compiling OSX/amd64"
 export GOOS=darwin
 export GOARCH=amd64
 go build -o "dist/osx_x64/msgfiber" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/osx_x64/msgfiber
 
 echo "Compiling OSX/i386"
 export GOOS=darwin
 export GOARCH=386
-go build -o "dist/osx_x64/msgfiber" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+go build -o "dist/osx_i386/msgfiber" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/osx_i386/msgfiber
+
+echo "Compiling windows/i386"
+export GOOS=windows
+export GOARCH=386
+go build -o "dist/windows_i386/msgfiber.exe" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/windows_i386/msgfiber.exe
+
+echo "Compiling windows/x64"
+export GOOS=windows
+export GOARCH=amd64
+go build -o "dist/windows_x64/msgfiber.exe" -ldflags "-X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_DATE '$date' -X github.com/fangli/msgfiber/parsecfg.SYS_VER '$version' -X github.com/fangli/msgfiber/parsecfg.SYS_BUILD_VER '$git_ver'" main.go
+ls -la dist/windows_x64/msgfiber.exe
