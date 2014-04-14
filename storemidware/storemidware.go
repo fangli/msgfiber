@@ -75,7 +75,12 @@ func (s *StoreMidware) loadData() (count int) {
 	if err != nil {
 		log.Fatal("Couldn't load message: ", err.Error())
 	}
-	return len(s.msgPool)
+
+	s.msgPoolLock.Lock()
+	cnt := len(s.msgPool)
+	s.msgPoolLock.Unlock()
+
+	return cnt
 }
 
 func (s *StoreMidware) sync() error {
@@ -94,15 +99,15 @@ func (s *StoreMidware) sync() error {
 			return err
 		}
 
+		s.msgPoolLock.Lock()
 		if !bytes.Equal(s.msgPool[channel], msg) {
-			s.msgPoolLock.Lock()
 			s.msgPool[channel] = msg
-			s.msgPoolLock.Unlock()
 			payload := structure.NewSyncResponse()
 			payload.Channel = channel
 			payload.Message = msg
 			s.ChangeNotification <- payload
 		}
+		s.msgPoolLock.Unlock()
 	}
 	return rows.Err()
 }

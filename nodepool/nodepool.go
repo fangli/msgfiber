@@ -60,7 +60,6 @@ func (n *Node) reset() {
 }
 
 func (n *Node) Receiver() {
-	defer n.reset()
 	decoder := msgpack.NewDecoder(n.Conn)
 	stats := structure.NodeStatus{}
 	for {
@@ -70,6 +69,7 @@ func (n *Node) Receiver() {
 		if err != nil {
 			n.Stats = nil
 			n.Delay = "N/A"
+			n.reset()
 			n.NodeLock.Unlock()
 			return
 		} else {
