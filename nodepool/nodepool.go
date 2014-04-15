@@ -183,7 +183,7 @@ func (p *Pool) makeOutConn() {
 	p.NodeListLock.Lock()
 	defer p.NodeListLock.Unlock()
 
-	time.Sleep(time.Second)
+	time.Sleep(time.Millisecond * 200)
 	log.Println("Connecting to other nodes in cluster")
 	for _, n := range p.NodeList {
 		go p.NodeHandler(n)
