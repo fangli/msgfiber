@@ -236,7 +236,7 @@ func (p *Processor) execCommand(client *Client, cmd *structure.Command) interfac
 }
 
 func (p *Processor) CheckPsk(psk []byte) error {
-	if bytes.Equal(psk, p.Config.Psk) {
+	if bytes.Equal(psk, p.Config.Psk) || len(p.Config.Psk) == 0 {
 		return nil
 	}
 	return errors.New("Invalid Access Key!!!")
@@ -360,6 +360,10 @@ func (p *Processor) ServeForever() {
 }
 
 func (p *Processor) init() {
+
+	if len(p.Config.Psk) == 0 {
+		log.Println("No PSK specificed, you are strongly recommended to set a secret key!!!")
+	}
 
 	p.broadcastChan = make(chan structure.SyncResponse)
 	p.ClientList = make(map[string]*Client)

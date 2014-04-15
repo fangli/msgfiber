@@ -41,13 +41,13 @@ func (c *Processor) writeHttpPayload(w http.ResponseWriter, payload interface{})
 
 func (c *Processor) CheckPskHeader(w http.ResponseWriter, r *http.Request) error {
 	psk := strings.Trim(r.Header.Get("PSK"), " ")
-	if psk != string(c.Config.Psk) {
+	if psk == string(c.Config.Psk) || len(c.Config.Psk) == 0 {
+		return nil
+	} else {
 		resp := structure.NewErrorResponse()
 		resp.Info = "PSK not acceptable, access denied!!!"
 		c.writeHttpPayload(w, resp)
 		return errors.New("PSK not Acceptable!!!")
-	} else {
-		return nil
 	}
 }
 
