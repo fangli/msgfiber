@@ -23,6 +23,7 @@ package processor
 import (
 	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strings"
@@ -79,8 +80,7 @@ func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "POST" {
-		body := make([]byte, r.ContentLength)
-		_, err := r.Body.Read(body)
+		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Unable to read request body", 500)
 		}

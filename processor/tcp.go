@@ -26,6 +26,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fangli/msgfiber/memstats"
@@ -45,13 +46,10 @@ type Client struct {
 }
 
 type ProcessorCounters struct {
-	startTime               int64
-	TotalConnections        int64
-	TotalConnectionsLock    sync.Mutex
-	RejectedConnections     int64
-	RejectedConnectionsLock sync.Mutex
-	Commands                int64
-	CommandsLock            sync.Mutex
+	startTime           int64
+	TotalConnections    int64
+	RejectedConnections int64
+	Commands            int64
 }
 
 type Processor struct {
@@ -261,18 +259,6 @@ func (p *Processor) ClientSender(client *Client) {
 	}
 }
 
-func (p *Processor) AddRejectedConnections() {
-	p.Stats.RejectedConnectionsLock.Lock()
-	defer p.Stats.RejectedConnectionsLock.Unlock()
-	p.Stats.RejectedConnections++
-}
-
-func (p *Processor) AddCmdCount() {
-	p.Stats.CommandsLock.Lock()
-	defer p.Stats.CommandsLock.Unlock()
-	p.Stats.Commands++
-}
-
 func (p *Processor) ClientReader(client *Client) {
 	defer p.Remove(client)
 	var err error
@@ -287,11 +273,11 @@ func (p *Processor) ClientReader(client *Client) {
 
 		err = p.CheckPsk(cmd.Psk)
 		if err != nil {
-			p.AddRejectedConnections()
+			atomic.AddInt64(&p.Stats.RejectedConnections, 1)
 			return
 		}
 
-		p.AddCmdCount()
+		atomic.AddInt64(&p.Stats.Commands, 1)
 		result := p.execCommand(client, cmd)
 		if result != nil {
 			p.Write(client, result)
@@ -312,9 +298,7 @@ func (p *Processor) ClientHandler(conn net.Conn) {
 	p.ClientList[name] = newClient
 	p.ClientListLock.Unlock()
 
-	p.Stats.TotalConnectionsLock.Lock()
-	p.Stats.TotalConnections++
-	p.Stats.TotalConnectionsLock.Unlock()
+	atomic.AddInt64(&p.Stats.TotalConnections, 1)
 
 	go p.ClientSender(newClient)
 	go p.ClientReader(newClient)
@@ -348,17 +332,11 @@ func (p *Processor) genStatsInfo(reqTime int64) structure.NodeStatus {
 	status.Connections_current = len(p.ClientList)
 	p.ClientListLock.Unlock()
 
-	p.Stats.TotalConnectionsLock.Lock()
-	status.Connections_total = p.Stats.TotalConnections
-	p.Stats.TotalConnectionsLock.Unlock()
+	status.Connections_total = atomic.LoadInt64(&p.Stats.TotalConnections)
 
-	p.Stats.RejectedConnectionsLock.Lock()
-	status.Connections_rejected = p.Stats.RejectedConnections
-	p.Stats.RejectedConnectionsLock.Unlock()
+	status.Connections_rejected = atomic.LoadInt64(&p.Stats.RejectedConnections)
 
-	p.Stats.CommandsLock.Lock()
-	status.Commands = p.Stats.Commands
-	p.Stats.CommandsLock.Unlock()
+	status.Commands = atomic.LoadInt64(&p.Stats.Commands)
 
 	status.Channels_count = p.store.MsgCount()
 	status.Storage_trend = p.store.DbStatus()
