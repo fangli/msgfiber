@@ -26,6 +26,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"strings"
 
 	"github.com/fangli/msgfiber/structure"

@@ -87,7 +87,14 @@ func (s *StoreMidware) sync() error {
 	var (
 		channel string
 		msg     []byte
+		payload structure.SyncResponse
 	)
+
+	payload = structure.NewSyncResponse()
+
+	s.msgPoolLock.Lock()
+	defer s.msgPoolLock.Unlock()
+
 	rows, err := s.db.Query("SELECT channel, msg FROM msgstore")
 	if err != nil {
 		return err
@@ -99,26 +106,29 @@ func (s *StoreMidware) sync() error {
 			return err
 		}
 
-		s.msgPoolLock.Lock()
 		if !bytes.Equal(s.msgPool[channel], msg) {
+			log.Println("Inconsistent Data detect! [", channel, "]:", string(s.msgPool[channel]), "->", string(msg))
 			s.msgPool[channel] = msg
-			payload := structure.NewSyncResponse()
 			payload.Channel = channel
 			payload.Message = msg
 			s.ChangeNotification <- payload
 		}
-		s.msgPoolLock.Unlock()
 	}
 	return rows.Err()
 }
 
 func (s *StoreMidware) periodicSync() {
 	log.Println("Synchronization from storage every", s.SyncInterval)
+
+	var t0 int64
+	var t1 int64
+	var err error
+
 	for {
 		time.Sleep(s.SyncInterval)
-		t0 := time.Now().UnixNano()
-		err := s.sync()
-		t1 := time.Now().UnixNano()
+		t0 = time.Now().UnixNano()
+		err = s.sync()
+		t1 = time.Now().UnixNano()
 		s.SyncLastsLock.Lock()
 		s.SyncPeriod = t1 - t0
 		s.LastSync = time.Now().Unix()

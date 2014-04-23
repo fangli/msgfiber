@@ -37,12 +37,19 @@ import (
 	"github.com/vmihailenco/msgpack"
 )
 
+type WritePayload struct {
+	Payload      interface{}
+	PayloadBytes []byte
+	isBytes      int
+}
+
 type Client struct {
-	Name     string
-	Channels []string
-	Outgoing chan interface{}
-	Conn     net.Conn
-	Quit     chan bool
+	Name        string
+	Channels    []string
+	ChannelLock sync.Mutex
+	Outgoing    chan WritePayload
+	Conn        net.Conn
+	ExitChan    chan byte
 }
 
 type ProcessorCounters struct {
@@ -53,35 +60,25 @@ type ProcessorCounters struct {
 }
 
 type Processor struct {
-	Config         parsecfg.Config
-	store          storemidware.StoreMidware
-	nodes          nodepool.Pool
-	broadcastChan  chan structure.SyncResponse
-	Stats          ProcessorCounters
-	ClientList     map[string]*Client
-	ClientListLock sync.Mutex
+	Config            parsecfg.Config
+	store             storemidware.StoreMidware
+	nodes             nodepool.Pool
+	broadcastChan     chan structure.SyncResponse
+	pingResponseBytes []byte
+	Stats             ProcessorCounters
+	ClientList        map[string]*Client
+	ClientListLock    sync.Mutex
 }
 
 func (p *Processor) ContainChannel(client *Client, channel string) bool {
+	client.ChannelLock.Lock()
+	defer client.ChannelLock.Unlock()
 	for _, t := range client.Channels {
 		if t == channel {
 			return true
 		}
 	}
 	return false
-}
-
-func (p *Processor) Remove(client *Client) {
-	client.Quit <- true
-	client.Quit <- true
-	p.ClientListLock.Lock()
-	for name, _ := range p.ClientList {
-		if name == client.Name {
-			delete(p.ClientList, client.Name)
-		}
-	}
-	p.ClientListLock.Unlock()
-	client.Conn.Close()
 }
 
 func (p *Processor) BroadcastOthers(excludeName string, channel string, msg []byte) {
@@ -92,15 +89,29 @@ func (p *Processor) BroadcastOthers(excludeName string, channel string, msg []by
 	for _, c := range p.ClientList {
 		if p.ContainChannel(c, channel) {
 			if excludeName != c.Name {
-				p.Write(c, payload)
+				p.Write(c, payload, []byte{})
 			}
 		}
 	}
 	p.ClientListLock.Unlock()
 }
 
-func (p *Processor) Write(client *Client, payload interface{}) {
-	client.Outgoing <- payload
+func (p *Processor) Write(client *Client, payload interface{}, rawPayload []byte) error {
+	if len(client.Outgoing) == 10 {
+		return errors.New("Client write buffer full")
+	}
+
+	if payload != nil {
+		client.Outgoing <- WritePayload{
+			Payload: payload,
+		}
+	} else {
+		client.Outgoing <- WritePayload{
+			PayloadBytes: rawPayload,
+			isBytes:      1,
+		}
+	}
+	return nil
 }
 
 func (p *Processor) NodesOk() error {
@@ -116,7 +127,7 @@ func (p *Processor) BroadcastHandler() {
 		p.ClientListLock.Lock()
 		for _, c := range p.ClientList {
 			if p.ContainChannel(c, msg.Channel) {
-				p.Write(c, msg)
+				p.Write(c, msg, []byte{})
 			}
 		}
 		p.ClientListLock.Unlock()
@@ -137,16 +148,20 @@ func (p *Processor) nodesMemStats() interface{} {
 
 func (p *Processor) get(client *Client) interface{} {
 	msgMap := make(map[string][]byte)
+	client.ChannelLock.Lock()
 	for _, channel := range client.Channels {
 		msgMap[channel] = p.store.Get(channel)
 	}
+	client.ChannelLock.Unlock()
 	resp := structure.NewGetResponse()
 	resp.Channel = msgMap
 	return resp
 }
 
 func (p *Processor) subscribe(client *Client, channels []string) interface{} {
+	client.ChannelLock.Lock()
 	client.Channels = channels
+	client.ChannelLock.Unlock()
 	resp := structure.NewSubscribeResponse()
 	resp.Channel = channels
 	return resp
@@ -183,10 +198,6 @@ func (p *Processor) sync(excludeName string, channel string, msg []byte) interfa
 	return nil
 }
 
-func (p *Processor) ping() interface{} {
-	return structure.NewPingResponse()
-}
-
 func (p *Processor) errResponse(client *Client, op string, errNotice string) interface{} {
 	resp := structure.NewErrorResponse()
 	resp.Info = errNotice
@@ -197,7 +208,8 @@ func (p *Processor) errResponse(client *Client, op string, errNotice string) int
 func (p *Processor) execCommand(client *Client, cmd *structure.Command) interface{} {
 	switch cmd.Op {
 	case "ping":
-		return p.ping()
+		p.Write(client, nil, p.pingResponseBytes)
+		return nil
 	case "stats":
 		if !(cmd.Reqtime > 0) {
 			return p.errResponse(client, "stats", "No Reqtime!")
@@ -242,29 +254,59 @@ func (p *Processor) CheckPsk(psk []byte) error {
 	return errors.New("Invalid Access Key!!!")
 }
 
-func (p *Processor) ClientSender(client *Client) {
-	defer p.Remove(client)
-	for {
-		select {
-		case resp := <-client.Outgoing:
-			payload, _ := msgpack.Marshal(resp)
-			client.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
-			_, err := client.Conn.Write(payload)
-			if err != nil {
-				return
-			}
-		case <-client.Quit:
+func (p *Processor) SendExitSig(client *Client, sig byte) {
+	client.ExitChan <- sig
+}
+
+func (p *Processor) RemoveMonitor(client *Client) {
+	if 'w' == <-client.ExitChan {
+		client.Conn.Close()
+		<-client.ExitChan
+		close(client.Outgoing)
+	} else {
+		close(client.Outgoing)
+		<-client.ExitChan
+		client.Conn.Close()
+	}
+
+	close(client.ExitChan)
+
+	p.ClientListLock.Lock()
+	delete(p.ClientList, client.Name)
+	p.ClientListLock.Unlock()
+
+}
+
+func (p *Processor) ClientWriter(client *Client) {
+	var rawbytes []byte
+	var payload WritePayload
+	var err error
+
+	defer p.SendExitSig(client, 'w')
+
+	for payload = range client.Outgoing {
+		client.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
+		if payload.isBytes == 0 {
+			rawbytes, _ = msgpack.Marshal(payload.Payload)
+			_, err = client.Conn.Write(rawbytes)
+		} else {
+			_, err = client.Conn.Write(payload.PayloadBytes)
+		}
+		if err != nil {
 			return
 		}
 	}
 }
 
 func (p *Processor) ClientReader(client *Client) {
-	defer p.Remove(client)
 	var err error
+	var result interface{}
+
+	defer p.SendExitSig(client, 'r')
+
 	decoder := msgpack.NewDecoder(client.Conn)
+	cmd := &structure.Command{}
 	for {
-		cmd := &structure.Command{}
 		client.Conn.SetReadDeadline(time.Now().Add(p.Config.ConnExpires))
 		err = decoder.Decode(cmd)
 		if err != nil {
@@ -278,9 +320,9 @@ func (p *Processor) ClientReader(client *Client) {
 		}
 
 		atomic.AddInt64(&p.Stats.Commands, 1)
-		result := p.execCommand(client, cmd)
+		result = p.execCommand(client, cmd)
 		if result != nil {
-			p.Write(client, result)
+			p.Write(client, result, []byte{})
 		}
 	}
 }
@@ -288,11 +330,12 @@ func (p *Processor) ClientReader(client *Client) {
 func (p *Processor) ClientHandler(conn net.Conn) {
 	name := conn.RemoteAddr().String()
 	newClient := &Client{
-		Name:     name,
-		Outgoing: make(chan interface{}, 100000),
-		Channels: []string{},
-		Conn:     conn,
-		Quit:     make(chan bool, 2),
+		Name:        name,
+		Outgoing:    make(chan WritePayload, 10),
+		Channels:    []string{},
+		ChannelLock: sync.Mutex{},
+		Conn:        conn,
+		ExitChan:    make(chan byte),
 	}
 	p.ClientListLock.Lock()
 	p.ClientList[name] = newClient
@@ -300,7 +343,8 @@ func (p *Processor) ClientHandler(conn net.Conn) {
 
 	atomic.AddInt64(&p.Stats.TotalConnections, 1)
 
-	go p.ClientSender(newClient)
+	go p.RemoveMonitor(newClient)
+	go p.ClientWriter(newClient)
 	go p.ClientReader(newClient)
 }
 
@@ -319,7 +363,7 @@ func (p *Processor) serveTcp() {
 			log.Println(err)
 			continue
 		}
-		go p.ClientHandler(conn)
+		p.ClientHandler(conn)
 	}
 }
 
@@ -367,6 +411,8 @@ func (p *Processor) init() {
 
 	p.broadcastChan = make(chan structure.SyncResponse)
 	p.ClientList = make(map[string]*Client)
+
+	p.pingResponseBytes, _ = msgpack.Marshal(structure.NewPingResponse())
 
 	go p.BroadcastHandler()
 
