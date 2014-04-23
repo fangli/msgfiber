@@ -32,8 +32,6 @@ import (
 	"github.com/vmihailenco/msgpack"
 )
 
-var statsReqPayload []byte
-
 type Node struct {
 	Name              string
 	Conn              net.Conn
@@ -43,6 +41,7 @@ type Node struct {
 	Delay             string
 	NodeLock          sync.Mutex
 	Psk               []byte
+	statsReqPayload   *structure.StatsRequest
 }
 
 type Pool struct {
@@ -105,6 +104,10 @@ func (n *Node) connect() error {
 }
 
 func (n *Node) statsPing() error {
+
+	n.statsReqPayload.Reqtime = time.Now().UnixNano()
+	statsReq, _ := msgpack.Marshal(n.statsReqPayload)
+
 	n.NodeLock.Lock()
 	defer n.NodeLock.Unlock()
 
@@ -112,7 +115,7 @@ func (n *Node) statsPing() error {
 		return errors.New("No connection established")
 	}
 	n.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
-	_, err := n.Conn.Write(statsReqPayload)
+	_, err := n.Conn.Write(statsReq)
 	return err
 }
 
@@ -197,17 +200,14 @@ func (p *Pool) makeOutConn() {
 func (p *Pool) Init() {
 	log.Println("Msgfiber nodes in this cluster:", p.NodeAddrs)
 
-	statsReq := structure.NewStatsRequest()
-	statsReq.Psk = p.Psk
-	statsReqPayload, _ = msgpack.Marshal(statsReq)
-
 	p.NodeList = make(map[string]*Node)
 	for _, addr := range p.NodeAddrs {
 		node := &Node{
-			Name:     addr,
-			Conn:     nil,
-			NodeLock: sync.Mutex{},
-			Psk:      p.Psk,
+			Name:            addr,
+			Conn:            nil,
+			NodeLock:        sync.Mutex{},
+			Psk:             p.Psk,
+			statsReqPayload: &structure.StatsRequest{Op: "stats", Psk: p.Psk},
 		}
 		p.NodeList[addr] = node
 	}
