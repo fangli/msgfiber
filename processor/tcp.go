@@ -285,7 +285,7 @@ func (p *Processor) ClientWriter(client *Client) {
 	defer p.SendExitSig(client, 'w')
 
 	for payload = range client.Outgoing {
-		client.Conn.SetWriteDeadline(time.Now().Add(time.Second * 2))
+		client.Conn.SetWriteDeadline(time.Now().Add(time.Second))
 		if payload.isBytes == 0 {
 			rawbytes, _ = msgpack.Marshal(payload.Payload)
 			_, err = client.Conn.Write(rawbytes)
@@ -322,7 +322,10 @@ func (p *Processor) ClientReader(client *Client) {
 		atomic.AddInt64(&p.Stats.Commands, 1)
 		result = p.execCommand(client, cmd)
 		if result != nil {
-			p.Write(client, result, []byte{})
+			if p.Write(client, result, []byte{}) != nil {
+				log.Println("Message dropped due to full of buffer, closing connection to", client.Name)
+				return
+			}
 		}
 	}
 }
