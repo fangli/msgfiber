@@ -75,11 +75,10 @@ func (n *Node) receiver() {
 			n.reset()
 			n.NodeLock.Unlock()
 			return
-		} else {
-			n.Stats = stats
-			n.Delay = strconv.FormatInt((time.Now().UnixNano()-stats.Reqtime)/10e6, 10) + "ms"
-			n.NodeLock.Unlock()
 		}
+		n.Stats = stats
+		n.Delay = strconv.FormatInt((time.Now().UnixNano()-stats.Reqtime)/10e6, 10) + "ms"
+		n.NodeLock.Unlock()
 
 	}
 }

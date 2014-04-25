@@ -81,19 +81,11 @@ func (p *Processor) ContainChannel(client *Client, channel string) bool {
 	return false
 }
 
-func (p *Processor) BroadcastOthers(excludeName string, channel string, msg []byte) {
+func (p *Processor) Broadcast(excludeName string, channel string, msg []byte) {
 	payload := structure.NewSyncResponse()
 	payload.Channel = channel
 	payload.Message = msg
-	p.ClientListLock.Lock()
-	for _, c := range p.ClientList {
-		if p.ContainChannel(c, channel) {
-			if excludeName != c.Name {
-				p.Write(c, payload, []byte{})
-			}
-		}
-	}
-	p.ClientListLock.Unlock()
+	p.broadcastChan <- payload
 }
 
 func (p *Processor) Write(client *Client, payload interface{}, rawPayload []byte) error {
@@ -182,7 +174,7 @@ func (p *Processor) set(excludeName string, channel string, msg []byte) interfac
 		return resp
 	}
 	p.nodes.NodeSync(channel, msg)
-	p.BroadcastOthers(excludeName, channel, msg)
+	p.Broadcast(excludeName, channel, msg)
 
 	resp.Status = 1
 	resp.Info = "OK"
@@ -192,7 +184,7 @@ func (p *Processor) set(excludeName string, channel string, msg []byte) interfac
 func (p *Processor) sync(excludeName string, channel string, msg []byte) interface{} {
 	if p.store.UpdateWithoutDb(channel, msg) == nil {
 		p.nodes.NodeSync(channel, msg)
-		p.BroadcastOthers(excludeName, channel, msg)
+		p.Broadcast(excludeName, channel, msg)
 	} else {
 	}
 	return nil
@@ -259,7 +251,14 @@ func (p *Processor) SendExitSig(client *Client, sig byte) {
 }
 
 func (p *Processor) RemoveMonitor(client *Client) {
-	if 'w' == <-client.ExitChan {
+
+	flag := <-client.ExitChan
+
+	p.ClientListLock.Lock()
+	delete(p.ClientList, client.Name)
+	p.ClientListLock.Unlock()
+
+	if flag == 'w' {
 		client.Conn.Close()
 		<-client.ExitChan
 		close(client.Outgoing)
@@ -270,11 +269,6 @@ func (p *Processor) RemoveMonitor(client *Client) {
 	}
 
 	close(client.ExitChan)
-
-	p.ClientListLock.Lock()
-	delete(p.ClientList, client.Name)
-	p.ClientListLock.Unlock()
-
 }
 
 func (p *Processor) ClientWriter(client *Client) {
