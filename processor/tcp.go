@@ -85,7 +85,7 @@ func (p *Processor) ContainChannel(client *Client, channel string) bool {
 }
 
 func (p *Processor) Write(client *Client, payload interface{}, rawPayload []byte) error {
-	if len(client.Outgoing) >= 9 {
+	if len(client.Outgoing) >= 4 {
 		return errors.New("Client write buffer full")
 	}
 
@@ -348,7 +348,7 @@ func (p *Processor) ClientHandler(conn net.Conn) {
 	name := conn.RemoteAddr().String()
 	newClient := &Client{
 		Name:        name,
-		Outgoing:    make(chan WritePayload, 10),
+		Outgoing:    make(chan WritePayload, 5),
 		Channels:    []string{},
 		ChannelLock: sync.Mutex{},
 		Conn:        conn,
