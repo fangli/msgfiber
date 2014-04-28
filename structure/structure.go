@@ -40,6 +40,7 @@ type NodeStatus struct {
 	Connections_total    int64
 	Connections_rejected int64
 	Commands             int64
+	CommandSync          int64
 	Reqtime              int64
 	Sync_lasts           string
 	Last_sync            int64
@@ -124,14 +125,12 @@ func NewSyncResponse() SyncResponse {
 }
 
 type PingResponse struct {
-	Status int
-	Op     string
+	Op string
 }
 
 func NewPingResponse() PingResponse {
 	return PingResponse{
-		Status: 1,
-		Op:     "ping",
+		Op: "p",
 	}
 }
 

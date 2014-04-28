@@ -88,7 +88,7 @@ func (c *Processor) httpSetHandler(w http.ResponseWriter, r *http.Request) {
 
 		channel := strings.Trim(r.Header.Get("CHANNEL"), " ")
 		if channel != "" && len(body) > 0 {
-			resp := c.set("", channel, body)
+			resp := c.set(channel, body)
 			c.writeHttpPayload(w, resp)
 		} else {
 			http.Error(w, "Missing HTTP header 'CHANNEL' or body data", 500)

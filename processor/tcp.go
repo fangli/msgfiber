@@ -57,17 +57,20 @@ type ProcessorCounters struct {
 	TotalConnections    int64
 	RejectedConnections int64
 	Commands            int64
+	CommandSync         int64
 }
 
 type Processor struct {
 	Config            parsecfg.Config
 	store             storemidware.StoreMidware
 	nodes             nodepool.Pool
-	broadcastChan     chan structure.SyncResponse
+	syncBroadcastChan chan structure.SyncResponse
 	pingResponseBytes []byte
 	Stats             ProcessorCounters
 	ClientList        map[string]*Client
 	ClientListLock    sync.Mutex
+	currentStats      structure.NodeStatus
+	currentStatsLock  sync.Mutex
 }
 
 func (p *Processor) ContainChannel(client *Client, channel string) bool {
@@ -81,15 +84,8 @@ func (p *Processor) ContainChannel(client *Client, channel string) bool {
 	return false
 }
 
-func (p *Processor) Broadcast(excludeName string, channel string, msg []byte) {
-	payload := structure.NewSyncResponse()
-	payload.Channel = channel
-	payload.Message = msg
-	p.broadcastChan <- payload
-}
-
 func (p *Processor) Write(client *Client, payload interface{}, rawPayload []byte) error {
-	if len(client.Outgoing) == 10 {
+	if len(client.Outgoing) >= 9 {
 		return errors.New("Client write buffer full")
 	}
 
@@ -113,9 +109,10 @@ func (p *Processor) NodesOk() error {
 	return errors.New("One or more nodes in this cluster are disconnected. In order to prevent from data inconsistent we rejected your request")
 }
 
-func (p *Processor) BroadcastHandler() {
+func (p *Processor) SyncBroadcastHandler() {
 	for {
-		msg := <-p.broadcastChan
+		msg := <-p.syncBroadcastChan
+		atomic.AddInt64(&p.Stats.CommandSync, 1)
 		p.ClientListLock.Lock()
 		for _, c := range p.ClientList {
 			if p.ContainChannel(c, msg.Channel) {
@@ -124,6 +121,13 @@ func (p *Processor) BroadcastHandler() {
 		}
 		p.ClientListLock.Unlock()
 	}
+}
+
+func (p *Processor) syncClients(channel string, msg []byte) {
+	payload := structure.NewSyncResponse()
+	payload.Channel = channel
+	payload.Message = msg
+	p.syncBroadcastChan <- payload
 }
 
 func (p *Processor) stats(reqTime int64) interface{} {
@@ -159,7 +163,7 @@ func (p *Processor) subscribe(client *Client, channels []string) interface{} {
 	return resp
 }
 
-func (p *Processor) set(excludeName string, channel string, msg []byte) interface{} {
+func (p *Processor) set(channel string, msg []byte) interface{} {
 	resp := structure.NewSetResponse()
 	err := p.NodesOk()
 	if err != nil {
@@ -174,18 +178,17 @@ func (p *Processor) set(excludeName string, channel string, msg []byte) interfac
 		return resp
 	}
 	p.nodes.NodeSync(channel, msg)
-	p.Broadcast(excludeName, channel, msg)
+	p.syncClients(channel, msg)
 
 	resp.Status = 1
 	resp.Info = "OK"
 	return resp
 }
 
-func (p *Processor) sync(excludeName string, channel string, msg []byte) interface{} {
+func (p *Processor) sync(channel string, msg []byte) interface{} {
 	if p.store.UpdateWithoutDb(channel, msg) == nil {
 		p.nodes.NodeSync(channel, msg)
-		p.Broadcast(excludeName, channel, msg)
-	} else {
+		p.syncClients(channel, msg)
 	}
 	return nil
 }
@@ -197,45 +200,61 @@ func (p *Processor) errResponse(client *Client, op string, errNotice string) int
 	return resp
 }
 
-func (p *Processor) execCommand(client *Client, cmd *structure.Command) interface{} {
-	switch cmd.Op {
-	case "ping":
+func (p *Processor) execCommand(client *Client, cmd *structure.Command) (interface{}, error) {
+
+	if cmd.Op == "p" {
 		p.Write(client, nil, p.pingResponseBytes)
-		return nil
+		return nil, nil
+	}
+
+	err := p.CheckPsk(cmd.Psk)
+	if err != nil {
+		return nil, err
+	}
+
+	switch cmd.Op {
+
 	case "stats":
 		if !(cmd.Reqtime > 0) {
-			return p.errResponse(client, "stats", "No Reqtime!")
+			return p.errResponse(client, "stats", "No Reqtime!"), nil
 		}
-		return p.stats(cmd.Reqtime)
+		return p.stats(cmd.Reqtime), nil
+
 	case "cluster_stats":
-		return p.nodesStats()
+		return p.nodesStats(), nil
+
 	case "mem_stats":
-		return p.nodesMemStats()
+		return p.nodesMemStats(), nil
+
 	case "get":
-		return p.get(client)
+		return p.get(client), nil
+
 	case "subscribe":
 		if cmd.Channel == nil {
-			return p.errResponse(client, "subscribe", "You must specific valid 'Channel' field for the channels you want to subscribe")
+			return p.errResponse(client, "subscribe", "You must specific valid 'Channel' field for the channels you want to subscribe"), nil
 		}
-		return p.subscribe(client, cmd.Channel)
+		return p.subscribe(client, cmd.Channel), nil
+
 	case "set":
 		if cmd.Channel == nil || len(cmd.Channel) != 1 {
-			return p.errResponse(client, "set", "You must specific valid 'Channel' field for the channels you want to update")
+			return p.errResponse(client, "set", "You must specific valid 'Channel' field for the channels you want to update"), nil
 		}
 		if cmd.Message == nil {
-			return p.errResponse(client, "set", "You must specific valid 'Message' for those channels")
+			return p.errResponse(client, "set", "You must specific valid 'Message' for those channels"), nil
 		}
-		return p.set(client.Name, cmd.Channel[0], cmd.Message)
+		return p.set(cmd.Channel[0], cmd.Message), nil
+
 	case "sync":
 		if cmd.Channel == nil || len(cmd.Channel) != 1 {
-			return errors.New("Invalid sync command received, no valid 'Channel'")
+			return errors.New("Invalid sync command received, no valid 'Channel'"), nil
 		}
 		if cmd.Message == nil {
-			return errors.New("Invalid sync command received, no valid 'Message'")
+			return errors.New("Invalid sync command received, no valid 'Message'"), nil
 		}
-		return p.sync(client.Name, cmd.Channel[0], cmd.Message)
+		return p.sync(cmd.Channel[0], cmd.Message), nil
+
 	default:
-		return p.errResponse(client, "Unknown", "Unrecognized Command")
+		return p.errResponse(client, "Unknown", "Unrecognized Command"), nil
 	}
 }
 
@@ -294,7 +313,7 @@ func (p *Processor) ClientWriter(client *Client) {
 
 func (p *Processor) ClientReader(client *Client) {
 	var err error
-	var result interface{}
+	var output interface{}
 
 	defer p.SendExitSig(client, 'r')
 
@@ -307,16 +326,17 @@ func (p *Processor) ClientReader(client *Client) {
 			return
 		}
 
-		err = p.CheckPsk(cmd.Psk)
+		atomic.AddInt64(&p.Stats.Commands, 1)
+
+		output, err = p.execCommand(client, cmd)
+
 		if err != nil {
 			atomic.AddInt64(&p.Stats.RejectedConnections, 1)
 			return
 		}
 
-		atomic.AddInt64(&p.Stats.Commands, 1)
-		result = p.execCommand(client, cmd)
-		if result != nil {
-			if p.Write(client, result, []byte{}) != nil {
+		if output != nil {
+			if p.Write(client, output, []byte{}) != nil {
 				log.Println("Message dropped due to full of buffer, closing connection to", client.Name)
 				return
 			}
@@ -364,26 +384,43 @@ func (p *Processor) serveTcp() {
 	}
 }
 
+func (p *Processor) statsInfoHandler() {
+	for {
+		p.currentStatsLock.Lock()
+
+		p.currentStats.Uptime = time.Now().Unix() - p.Stats.startTime
+
+		p.ClientListLock.Lock()
+		p.currentStats.Connections_current = len(p.ClientList)
+		p.ClientListLock.Unlock()
+
+		p.currentStats.Connections_total = atomic.LoadInt64(&p.Stats.TotalConnections)
+
+		p.currentStats.Connections_rejected = atomic.LoadInt64(&p.Stats.RejectedConnections)
+
+		p.currentStats.Commands = atomic.LoadInt64(&p.Stats.Commands)
+		p.currentStats.CommandSync = atomic.LoadInt64(&p.Stats.CommandSync)
+
+		p.currentStats.Channels_count = p.store.MsgCount()
+		p.currentStats.Storage_trend = p.store.DbStatus()
+		p.currentStats.Sync_lasts = p.store.GetSyncPeriod()
+		p.currentStats.Last_sync = p.store.GetLastSync()
+
+		p.currentStatsLock.Unlock()
+
+		time.Sleep(time.Millisecond * 1100)
+	}
+}
+
 func (p *Processor) genStatsInfo(reqTime int64) structure.NodeStatus {
-	var status structure.NodeStatus
-	status.Uptime = time.Now().Unix() - p.Stats.startTime
-	status.Reqtime = reqTime
-
-	p.ClientListLock.Lock()
-	status.Connections_current = len(p.ClientList)
-	p.ClientListLock.Unlock()
-
-	status.Connections_total = atomic.LoadInt64(&p.Stats.TotalConnections)
-
-	status.Connections_rejected = atomic.LoadInt64(&p.Stats.RejectedConnections)
-
-	status.Commands = atomic.LoadInt64(&p.Stats.Commands)
-
-	status.Channels_count = p.store.MsgCount()
-	status.Storage_trend = p.store.DbStatus()
-	status.Sync_lasts = p.store.GetSyncPeriod()
-	status.Last_sync = p.store.GetLastSync()
-	return status
+	var stats structure.NodeStatus
+	p.currentStatsLock.Lock()
+	statsStr, _ := msgpack.Marshal(p.currentStats)
+	p.currentStatsLock.Unlock()
+	msgpack.Unmarshal(statsStr, &stats)
+	stats.Reqtime = reqTime
+	statsStr = nil
+	return stats
 }
 
 func (p *Processor) genClusterStatsInfo() interface{} {
@@ -406,19 +443,19 @@ func (p *Processor) init() {
 		log.Println("No PSK specificed, you are strongly recommended to set a secret key!!!")
 	}
 
-	p.broadcastChan = make(chan structure.SyncResponse)
+	p.syncBroadcastChan = make(chan structure.SyncResponse)
 	p.ClientList = make(map[string]*Client)
-
 	p.pingResponseBytes, _ = msgpack.Marshal(structure.NewPingResponse())
+	p.currentStats = structure.NodeStatus{}
 
-	go p.BroadcastHandler()
+	go p.SyncBroadcastHandler()
 
 	p.Stats.startTime = time.Now().Unix()
 
 	p.store = storemidware.StoreMidware{
 		Dsn:                p.Config.Dsn,
 		SyncInterval:       p.Config.SyncInterval,
-		ChangeNotification: p.broadcastChan,
+		ChangeNotification: p.syncBroadcastChan,
 	}
 	p.store.Init()
 
@@ -428,4 +465,5 @@ func (p *Processor) init() {
 	}
 	p.nodes.Init()
 
+	go p.statsInfoHandler()
 }
