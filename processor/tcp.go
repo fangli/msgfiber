@@ -142,15 +142,19 @@ func (p *Processor) nodesMemStats() interface{} {
 	return p.getMemStats()
 }
 
-func (p *Processor) get(client *Client) interface{} {
+func (p *Processor) getClientMsg(client *Client) map[string][]byte {
 	msgMap := make(map[string][]byte)
 	client.ChannelLock.Lock()
 	for _, channel := range client.Channels {
 		msgMap[channel] = p.store.Get(channel)
 	}
 	client.ChannelLock.Unlock()
+	return msgMap
+}
+
+func (p *Processor) get(client *Client) interface{} {
 	resp := structure.NewGetResponse()
-	resp.Channel = msgMap
+	resp.Channel = p.getClientMsg(client)
 	return resp
 }
 
@@ -159,7 +163,7 @@ func (p *Processor) subscribe(client *Client, channels []string) interface{} {
 	client.Channels = channels
 	client.ChannelLock.Unlock()
 	resp := structure.NewSubscribeResponse()
-	resp.Channel = channels
+	resp.Channel = p.getClientMsg(client)
 	return resp
 }
 

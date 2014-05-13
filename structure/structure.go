@@ -61,7 +61,7 @@ type ClusterStatus struct {
 type SubscribeResponse struct {
 	Status  int
 	Op      string
-	Channel []string
+	Channel map[string][]byte
 }
 
 func NewSubscribeResponse() SubscribeResponse {

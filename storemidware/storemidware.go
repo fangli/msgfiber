@@ -228,5 +228,8 @@ func (s *StoreMidware) DbStatus() [100]int {
 func (s *StoreMidware) Get(channel string) []byte {
 	s.msgPoolLock.Lock()
 	defer s.msgPoolLock.Unlock()
-	return s.msgPool[channel]
+	if ret, ok := s.msgPool[channel]; ok {
+		return ret
+	}
+	return []byte("")
 }
